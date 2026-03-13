@@ -1,0 +1,218 @@
+version: 0.2
+
+# Variables de entorno necesarias:
+# - VERACODE_API_ID (almacenado en AWS Secrets Manager o Parameter Store)
+# - VERACODE_API_KEY (almacenado en AWS Secrets Manager o Parameter Store)
+# - SCAN_TYPE: "pipeline", "pipeline-gate", "policy", o "sandbox" (opcional, se detecta por branch)
+# - BRANCH_NAME: inyectado por CodePipeline o definido manualmente (opcional, default: main)
+
+env:
+  shell: bash
+  variables:
+    # Configurar según tu aplicación
+    APP_NAME: "AWS_Application"
+    SANDBOX_NAME: "aws-release"
+
+phases:
+  install:
+    runtime-versions:
+      java: corretto17
+    commands:
+      - echo "Instalando prerrequisitos..."
+      # Nota: Imagen Ubuntu requerida en CodeBuild (ej: aws/codebuild/standard:7.0)
+      # El autopackager de Veracode soporta múltiples tecnologías automáticamente
+      - apt-get update && apt-get install -y curl unzip grep
+      
+      - echo "Instalando Veracode CLI..."
+      - curl -fsS -O https://tools.veracode.com/veracode-cli/install
+      - chmod +x ./install
+      - ./install
+      - ls -la
+      - |
+        if [ -f "./veracode" ]; then
+          chmod +x veracode
+          ./veracode version
+        else
+          echo "ERROR: Veracode CLI no se instaló correctamente"
+          exit 1
+        fi
+  
+  pre_build:
+    commands:
+      - echo "Fase de pre-build iniciada..."
+      - echo "Branch - ${BRANCH_NAME:-main}"
+      - echo "Build ID - ${CODEBUILD_BUILD_NUMBER}"
+      - echo "Commit ID - ${CODEBUILD_RESOLVED_SOURCE_VERSION}"
+      
+      # Validar credenciales de Veracode
+      - |
+        if [ -z "$VERACODE_API_ID" ] || [ -z "$VERACODE_API_KEY" ]; then
+          echo "ERROR: VERACODE_API_ID y VERACODE_API_KEY son requeridos"
+          echo "Configurar en Secrets Manager o como variables de entorno"
+          exit 1
+        fi
+        echo "Credenciales de Veracode verificadas"
+  
+  build:
+    commands:
+      - echo "Ejecutando autopackager de Veracode..."
+      - mkdir -p verascan
+      - ./veracode package --source . --output verascan --trust
+      - echo "Artefactos empaquetados:"
+      - ls -lhR verascan
+      
+      # Buscar archivo empaquetado
+      - |
+        PACKAGED_FILE=$(find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) | head -n1)
+        if [ -z "$PACKAGED_FILE" ]; then
+          echo "ERROR: No se encontró ningún artefacto empaquetado"
+          echo "Verificar que el proyecto contiene código compilable"
+          ls -lR verascan
+          exit 1
+        fi
+        echo "Archivo principal empaquetado: $PACKAGED_FILE"
+        echo "$PACKAGED_FILE" > packaged_file.txt
+        export PACKAGED_FILE
+      
+      - echo "Ejecutando Veracode Agent-Based SCA..."
+      - curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
+      
+      # Determinar el tipo de escaneo basado en el branch o variable SCAN_TYPE
+      - |
+        set -e
+        
+        # Función auxiliar para verificar si el branch comienza con "release/"
+        is_release_branch() {
+          case "${BRANCH_NAME}" in
+            release/*) return 0 ;;
+            *) return 1 ;;
+          esac
+        }
+        
+        if [ "${SCAN_TYPE}" = "policy" ] || [ "${BRANCH_NAME}" = "main" ]; then
+          echo "=== Ejecutando Policy Scan para Producción ==="
+          
+          echo "Descargando Veracode Java API Wrapper..."
+          mkdir -p .veracode
+          VERSION=$(curl -sS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: No se pudo obtener la versión del API Wrapper"
+            exit 1
+          fi
+          echo "Descargando versión: $VERSION"
+          curl -sSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
+          cd .veracode && unzip -o dist.zip && cd ..
+          JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+          if [ -z "$JAR_PATH" ]; then
+            echo "ERROR: No se encontró VeracodeJavaAPI.jar"
+            exit 1
+          fi
+          cp "$JAR_PATH" vosp-api-wrapper-java.jar
+          
+          echo "Subiendo a la Plataforma Veracode..."
+          java -jar vosp-api-wrapper-java.jar \
+            -vid $VERACODE_API_ID \
+            -vkey $VERACODE_API_KEY \
+            -action UploadAndScan \
+            -appname "$APP_NAME" \
+            -createprofile true \
+            -autoscan true \
+            -filepath "$PACKAGED_FILE" \
+            -version "Build ${CODEBUILD_BUILD_NUMBER}"
+        
+        elif [ "${SCAN_TYPE}" = "sandbox" ] || is_release_branch; then
+          echo "=== Ejecutando Sandbox Scan para Release ==="
+          
+          echo "Descargando Veracode Java API Wrapper..."
+          mkdir -p .veracode
+          VERSION=$(curl -sS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: No se pudo obtener la versión del API Wrapper"
+            exit 1
+          fi
+          echo "Descargando versión: $VERSION"
+          curl -sSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
+          cd .veracode && unzip -o dist.zip && cd ..
+          JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+          if [ -z "$JAR_PATH" ]; then
+            echo "ERROR: No se encontró VeracodeJavaAPI.jar"
+            exit 1
+          fi
+          cp "$JAR_PATH" vosp-api-wrapper-java.jar
+          
+          echo "Subiendo a Veracode Sandbox..."
+          java -jar vosp-api-wrapper-java.jar \
+            -vid $VERACODE_API_ID \
+            -vkey $VERACODE_API_KEY \
+            -action UploadAndScan \
+            -appname "$APP_NAME" \
+            -createprofile true \
+            -autoscan true \
+            -sandboxname "$SANDBOX_NAME" \
+            -createsandbox true \
+            -filepath "$PACKAGED_FILE" \
+            -version "Release ${CODEBUILD_BUILD_NUMBER}"
+        
+        elif [ "${SCAN_TYPE}" = "pipeline-gate" ]; then
+          echo "=== Ejecutando Pipeline Scan con Policy Gate ==="
+          
+          echo "Descargando Veracode Pipeline Scanner..."
+          curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -o pipeline-scan-LATEST.zip
+          
+          if [ ! -f "pipeline-scan.jar" ]; then
+            echo "ERROR: No se pudo descargar pipeline-scan.jar"
+            exit 1
+          fi
+          
+          echo "Ejecutando Veracode Pipeline Scan con Policy Gate..."
+          java -jar pipeline-scan.jar \
+            -f "$PACKAGED_FILE" \
+            -vid $VERACODE_API_ID \
+            -vkey $VERACODE_API_KEY \
+            --fail_on_severity "Very High, High" \
+            --issue_details true \
+            --policy "Veracode Recommended Very High"
+        
+        else
+          echo "=== Ejecutando Pipeline Scan (Por Defecto para Feature Branches) ==="
+          
+          echo "Descargando Veracode Pipeline Scanner..."
+          curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -o pipeline-scan-LATEST.zip
+          
+          if [ ! -f "pipeline-scan.jar" ]; then
+            echo "ERROR: No se pudo descargar pipeline-scan.jar"
+            exit 1
+          fi
+          
+          echo "Ejecutando Veracode Pipeline Scan..."
+          java -jar pipeline-scan.jar \
+            -f "$PACKAGED_FILE" \
+            -vid $VERACODE_API_ID \
+            -vkey $VERACODE_API_KEY \
+            --fail_on_severity "" \
+            --issue_details true \
+            || echo "Pipeline scan completado con hallazgos"
+        fi
+  
+  post_build:
+    commands:
+      - echo "Build completado el $(date)"
+      - echo "Artefactos de escaneo disponibles en el directorio verascan"
+
+artifacts:
+  files:
+    - 'verascan/**/*'
+    - 'packaged_file.txt'
+    - 'results.json'
+    - 'filtered_results.json'
+  name: veracode-scan-artifacts
+
+cache:
+  paths:
+    # Cache para múltiples gestores de dependencias
+    - '/root/.m2/**/*'      # Maven
+    - '/root/.gradle/**/*'  # Gradle
+    - 'node_modules/**/*'   # Node.js/npm
+    - '.nuget/**/*'         # .NET/NuGet
