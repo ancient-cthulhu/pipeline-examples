@@ -14,7 +14,15 @@ Repository that provides example CI/CD pipeline configurations for Veracode inte
 │       ├── aws-pipeline.yml
 │       └── veracode-strategy.md
 │
-├── azure/                    # Coming soon
+├── azure/
+│   ├── english/
+│   │   ├── azure-pipelines.yml
+│   │   └── veracode-strategy.md
+│   ├── spanish/
+│   │   ├── azure-pipelines.yml
+│   │   └── veracode-strategy.md
+│   └── README.md
+│
 ├── github-actions/           # Coming soon
 ├── gitlab-ci/                # Coming soon
 └── jenkins/                  # Coming soon
@@ -46,18 +54,21 @@ Each implementation provides:
 
 ## Quick Start
 
-1. **Copy the pipeline file** to your repository:
-   ```bash
-   cp aws/spanish/aws-pipeline.yml ./aws-pipeline.yml
-   ```
+### AWS CodeBuild
 
-2. **Configure your CI/CD platform** with Veracode API credentials
+1. Copy `aws/spanish/aws-pipeline.yml` to your repo as `buildspec.yml`
+2. Configure Veracode API credentials in Secrets Manager or Parameter Store
+3. Set `APP_NAME` and `SANDBOX_NAME` variables
+4. Run via CodeBuild
 
-3. **Customize variables**:
-   - `APP_NAME`: Your application name
-   - `SANDBOX_NAME`: Sandbox identifier
+### Azure Pipelines
 
-4. **Commit and run** - Pipeline auto-detects branch type and executes appropriate scan
+1. Copy `azure/english/azure-pipelines.yml` (or `azure/spanish/`) to your repo root
+2. Create a variable group `veracode-credentials` in Azure DevOps with `VERACODE_API_ID` and `VERACODE_API_KEY` as secrets
+3. Set `APP_NAME` and `SANDBOX_NAME` in the variables section
+4. Create a new pipeline in Azure DevOps pointing to `azure-pipelines.yml`
+
+Both pipelines auto-detect the branch type and run the appropriate scan. No manual scan type selection needed.
 
 ---
 
@@ -79,5 +90,3 @@ Each folder contains:
 - [Veracode CLI](https://docs.veracode.com/r/Install_the_Veracode_CLI)
 - [Pipeline Scan](https://docs.veracode.com/r/Pipeline_Scan)
 - [SCA Agent-Based](https://docs.veracode.com/r/Agent_Based_Scans)
-
-
