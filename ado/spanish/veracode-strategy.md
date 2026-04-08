@@ -175,6 +175,21 @@ El pipeline usa variables nativas de Azure Pipelines para seleccion automatica d
 
 Las variables secretas de variable groups NO se expanden como macro dentro de bloques `script:`. El pipeline usa mappings `env:` para inyectar secretos como variables de entorno, y luego los referencia como `$VERACODE_API_ID` (variable de shell) en el cuerpo del script. Variables no secretas como `$(APP_NAME)` y `$(PACKAGED_FILE)` se expanden normalmente como macro.
 
+### Disparadores de Pull Request (Azure Repos Git)
+
+Cuando se utiliza **Azure Repos Git**, las builds de Pull Request **no se activan únicamente con el bloque `pr:` en el YAML**.
+
+Para garantizar que se ejecute correctamente el **Pipeline Scan para PR (con gate)**, es necesario configurar una **Política de Rama (Branch Policy) con Build Validation** en la rama destino (por ejemplo, `main`):
+
+1. Ir a **Repos → Branches**
+2. Seleccionar la rama destino (`main`)
+3. Abrir **Branch policies**
+4. En **Build validation**, agregar este pipeline
+5. (Opcional) Marcarlo como **Required** para bloquear la finalización del PR si fallan los controles de seguridad
+
+Una vez que la política de rama dispara el pipeline, la lógica del YAML utiliza  
+`Build.Reason = PullRequest` para ejecutar automáticamente la etapa de **Pipeline Scan con gate para PR**.
+
 ---
 
 ## Resultados y Reportes
