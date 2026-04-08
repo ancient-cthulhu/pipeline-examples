@@ -175,6 +175,21 @@ The pipeline uses Azure Pipelines built-in variables for automatic scan selectio
 
 Secret variables from variable groups are NOT macro-expanded inside `script:` blocks. The pipeline uses `env:` mappings to inject secrets as environment variables, then references them as `$VERACODE_API_ID` (shell env var) in the script body. Non-secret variables like `$(APP_NAME)` and `$(PACKAGED_FILE)` are macro-expanded normally.
 
+### Pull Request Triggers (Azure Repos Git)
+
+When using **Azure Repos Git**, Pull Request builds are **not triggered by the `pr:` block in YAML alone**.
+
+To ensure the **PR Pipeline Scan (with gate)** runs correctly, configure a **Branch Policy with Build Validation** on the target branch (e.g. `main`):
+
+1. Go to **Repos → Branches**
+2. Select the target branch (`main`)
+3. Open **Branch policies**
+4. Under **Build validation**, add this pipeline
+5. (Optional) Mark it as **Required** to block PR completion on failed security gates
+
+Once the branch policy triggers the pipeline, the YAML logic uses  
+`Build.Reason = PullRequest` to automatically run the **PR-gated Pipeline Scan** stage.
+
 ---
 
 ## Results and Reports
