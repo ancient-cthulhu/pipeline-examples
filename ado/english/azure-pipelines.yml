@@ -85,7 +85,7 @@ stages:
               ls -lhR verascan
             displayName: 'Veracode autopackager'
 
-          # --- List all artifacts found ---
+          # --- List and validate all artifacts found ---
           - script: |
               echo "Listing all packaged artifacts..."
               find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
@@ -103,7 +103,7 @@ stages:
               echo "Total artifacts: $ARTIFACT_COUNT"
               echo "##vso[task.setvariable variable=ARTIFACT_COUNT;isOutput=true]$ARTIFACT_COUNT"
             name: ListArtifacts
-            displayName: 'List all artifacts'
+            displayName: 'List and validate artifacts'
 
           # --- Create bundle zip for Policy/Sandbox scans ---
           - script: |
