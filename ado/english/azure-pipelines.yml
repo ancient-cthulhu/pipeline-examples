@@ -332,7 +332,7 @@ stages:
             continueOnError: true
 
   # =============================================================================
-  # Stage 4: Sandbox Scan - Release Branches (bundle zip)
+  # Stage 4: Sandbox Scan - Release Branches 
   # =============================================================================
   - stage: SandboxScan
     displayName: 'Sandbox Scan (release)'
@@ -394,7 +394,7 @@ stages:
               VERACODE_API_KEY: $(VERACODE_API_KEY)
 
   # =============================================================================
-  # Stage 5: Policy Scan - Main Branch (bundle zip)
+  # Stage 5: Policy Scan - Main Branch 
   # =============================================================================
   - stage: PolicyScan
     displayName: 'Policy Scan (production)'
