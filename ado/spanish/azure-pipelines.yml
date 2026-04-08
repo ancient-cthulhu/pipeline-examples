@@ -105,21 +105,7 @@ stages:
             name: ListArtifacts
             displayName: 'Listar y validar artefactos'
 
-          # --- Crear carpeta de upload para Policy/Sandbox scans ---
-          - script: |
-              echo "Creando carpeta de artefactos para escaneos de plataforma..."
-              mkdir -p upload_bundle
-              
-              while IFS= read -r artifact; do
-                echo "Copiando: $artifact"
-                cp "$artifact" upload_bundle/
-              done < artifact_list.txt
-              
-              echo "Artefactos listos para upload:"
-              ls -lh upload_bundle/
-            displayName: 'Preparar carpeta de upload'
-
-          # --- Copiar al directorio de artefactos ---
+          # --- Copiar lista de artefactos a verascan para publicar ---
           - script: |
               cp artifact_list.txt verascan/
             displayName: 'Preparar artefactos para publicar'
@@ -347,7 +333,7 @@ stages:
 
           - script: |
               echo "Artefactos para upload:"
-              ls -lh upload_bundle/
+              ls -lh verascan/
             displayName: 'Listar artefactos para upload'
 
           - script: |
@@ -380,7 +366,7 @@ stages:
                 -autoscan true \
                 -sandboxname "$(SANDBOX_NAME)" \
                 -createsandbox true \
-                -filepath "upload_bundle" \
+                -filepath "verascan" \
                 -version "Release $(Build.BuildNumber)"
             displayName: 'Veracode Sandbox Scan'
             env:
@@ -410,7 +396,7 @@ stages:
 
           - script: |
               echo "Artefactos para upload:"
-              ls -lh upload_bundle/
+              ls -lh verascan/
             displayName: 'Listar artefactos para upload'
 
           - script: |
@@ -441,7 +427,7 @@ stages:
                 -appname "$(APP_NAME)" \
                 -createprofile true \
                 -autoscan true \
-                -filepath "upload_bundle" \
+                -filepath "verascan" \
                 -version "Build $(Build.BuildNumber)"
             displayName: 'Veracode Policy Scan'
             env:
