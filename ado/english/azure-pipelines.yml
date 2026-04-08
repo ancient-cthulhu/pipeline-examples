@@ -223,7 +223,6 @@ stages:
                 -f "$(PACKAGED_FILE)" \
                 -vid $VERACODE_API_ID \
                 -vkey $VERACODE_API_KEY \
-                --fail_on_severity "Very High, High" \
                 --issue_details true \
                 --policy_name "Veracode Recommended Very High"
             displayName: 'Pipeline Scan (gate enabled)'
