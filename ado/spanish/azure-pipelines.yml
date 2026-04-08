@@ -191,7 +191,12 @@ stages:
               mkdir -p scan_results
               SCAN_COUNT=0
               
-              for artifact in $(find verascan -type f \( -name "*.war" -o -name "*.jar" \) ! -name "veracode_upload_bundle.zip"); do
+              # Usar artifact_list.txt creado durante empaquetado (excluye bundle)
+              while IFS= read -r artifact; do
+                # Saltar el bundle zip
+                if [[ "$artifact" == *"veracode_upload_bundle.zip" ]]; then
+                  continue
+                fi
                 SCAN_COUNT=$((SCAN_COUNT + 1))
                 ARTIFACT_NAME=$(basename "$artifact")
                 echo ""
@@ -212,7 +217,7 @@ stages:
                 if [ -f "results.json" ]; then
                   mv results.json "scan_results/results_${ARTIFACT_NAME}.json"
                 fi
-              done
+              done < verascan/artifact_list.txt
               
               echo ""
               echo "=========================================="
@@ -267,7 +272,12 @@ stages:
               SCAN_COUNT=0
               FAILED_ARTIFACTS=""
               
-              for artifact in $(find verascan -type f \( -name "*.war" -o -name "*.jar" \) ! -name "veracode_upload_bundle.zip"); do
+              # Usar artifact_list.txt creado durante empaquetado (excluye bundle)
+              while IFS= read -r artifact; do
+                # Saltar el bundle zip
+                if [[ "$artifact" == *"veracode_upload_bundle.zip" ]]; then
+                  continue
+                fi
                 SCAN_COUNT=$((SCAN_COUNT + 1))
                 ARTIFACT_NAME=$(basename "$artifact")
                 echo ""
@@ -291,7 +301,7 @@ stages:
                 if [ -f "results.json" ]; then
                   mv results.json "scan_results/results_${ARTIFACT_NAME}.json"
                 fi
-              done
+              done < verascan/artifact_list.txt
               
               echo ""
               echo "=========================================="
