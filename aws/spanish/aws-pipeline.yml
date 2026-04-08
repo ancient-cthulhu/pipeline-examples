@@ -1,302 +1,449 @@
-version: 0.2
-
-# Variables de entorno necesarias:
-# - VERACODE_API_ID (almacenado en AWS Secrets Manager o Parameter Store)
-# - VERACODE_API_KEY (almacenado en AWS Secrets Manager o Parameter Store)
-# - SRCCLR_API_TOKEN (opcional, para SCA)
-# - SCAN_TYPE: "pipeline", "pipeline-gate", "policy", o "sandbox" (opcional, se detecta por branch)
-# - BRANCH_NAME: inyectado por CodePipeline o definido manualmente (opcional, default: main)
+# azure-pipelines.yml
+# Escaneo de Seguridad Veracode para Azure Pipelines (Multi-Artifact Support)
 #
-# Comportamiento multi-artefacto:
-#   pipeline/pipeline-gate -> Cada artefacto escaneado individualmente
-#   policy/sandbox         -> Todos los artefactos en un solo zip
+# Variables requeridas (configurar en Variable Group "veracode-credentials"):
+#   - VERACODE_API_ID: ID de API Veracode (secreto)
+#   - VERACODE_API_KEY: Key de API Veracode (secreto)
+#   - SRCCLR_API_TOKEN: SCA Agent Based (secreto, opcional)
+#
+# El tipo de escaneo se detecta automaticamente por branch:
+#   feature/*  -> Pipeline Scan (sin gate) - cada artefacto individualmente
+#   PR a main  -> Pipeline Scan (gate en Very High/High) - cada artefacto individualmente
+#   release/*  -> Sandbox Scan - todos los artefactos en un zip
+#   main       -> Policy Scan - todos los artefactos en un zip
+#
+# SCA se ejecuta en todos los branches.
 
-env:
-  shell: bash
-  variables:
-    APP_NAME: "AWS_Application"
-    SANDBOX_NAME: "aws-release"
+trigger:
+  branches:
+    include:
+      - main
+      - feature/*
+      - release/*
 
-phases:
-  install:
-    runtime-versions:
-      java: corretto17
-    commands:
-      - echo "Instalando prerrequisitos..."
-      - apt-get update && apt-get install -y curl unzip grep zip
-      
-      - echo "Instalando Veracode CLI..."
-      - curl -fsS -O https://tools.veracode.com/veracode-cli/install
-      - chmod +x ./install
-      - ./install
-      - |
-        if [ -f "./veracode" ]; then
-          chmod +x veracode
-          ./veracode version
-        else
-          echo "ERROR: Veracode CLI no se instalo correctamente"
-          exit 1
-        fi
-  
-  pre_build:
-    commands:
-      - echo "Fase de pre-build iniciada..."
-      - echo "Branch - ${BRANCH_NAME:-main}"
-      - echo "Build ID - ${CODEBUILD_BUILD_NUMBER}"
-      - echo "Commit ID - ${CODEBUILD_RESOLVED_SOURCE_VERSION}"
-      
-      - |
-        if [ -z "$VERACODE_API_ID" ] || [ -z "$VERACODE_API_KEY" ]; then
-          echo "ERROR: VERACODE_API_ID y VERACODE_API_KEY son requeridos"
-          echo "Configurar en Secrets Manager o como variables de entorno"
-          exit 1
-        fi
-        echo "Credenciales de Veracode verificadas"
-  
-  build:
-    commands:
-      - echo "Ejecutando autopackager de Veracode..."
-      - mkdir -p verascan
-      - ./veracode package --source . --output verascan --trust
-      - echo "Artefactos empaquetados:"
-      - ls -lhR verascan
-      
-      # Listar y validar todos los artefactos
-      - |
-        echo "Listando todos los artefactos empaquetados..."
-        find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
-        
-        if [ ! -s artifact_list.txt ]; then
-          echo "ERROR: No se encontraron artefactos empaquetados"
-          echo "Verificar que el proyecto contiene codigo compilable"
-          ls -lR verascan
-          exit 1
-        fi
-        
-        echo "Artefactos encontrados:"
-        cat artifact_list.txt
-        
-        ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
-        echo "Total de artefactos: $ARTIFACT_COUNT"
-      
-      # Crear bundle zip para Policy/Sandbox scans
-      - |
-        echo "Creando bundle de artefactos para escaneos de plataforma..."
-        mkdir -p upload_bundle
-        
-        while IFS= read -r artifact; do
-          echo "Copiando: $artifact"
-          cp "$artifact" upload_bundle/
-        done < artifact_list.txt
-        
-        cd upload_bundle
-        zip -r ../veracode_upload_bundle.zip .
-        cd ..
-        
-        echo "Bundle creado:"
-        ls -lh veracode_upload_bundle.zip
-        unzip -l veracode_upload_bundle.zip
-      
-      - echo "Ejecutando Veracode Agent-Based SCA..."
-      - curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
-      
-      # Determinar el tipo de escaneo basado en el branch o variable SCAN_TYPE
-      - |
-        set -e
-        
-        is_release_branch() {
-          case "${BRANCH_NAME}" in
-            release/*) return 0 ;;
-            *) return 1 ;;
-          esac
-        }
-        
-        if [ "${SCAN_TYPE}" = "policy" ] || [ "${BRANCH_NAME}" = "main" ]; then
-          echo "=== Ejecutando Policy Scan para Produccion ==="
-          
-          echo "Descargando Veracode Java API Wrapper..."
-          mkdir -p .veracode
-          VERSION=$(curl -sS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
-          if [ -z "$VERSION" ]; then
-            echo "ERROR: No se pudo obtener la version del API Wrapper"
-            exit 1
-          fi
-          echo "Descargando version: $VERSION"
-          curl -sSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
-          cd .veracode && unzip -o dist.zip && cd ..
-          JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
-          if [ -z "$JAR_PATH" ]; then
-            echo "ERROR: No se encontro VeracodeJavaAPI.jar"
-            exit 1
-          fi
-          cp "$JAR_PATH" vosp-api-wrapper-java.jar
-          
-          echo "Subiendo bundle a la Plataforma Veracode..."
-          echo "Archivo: veracode_upload_bundle.zip"
-          java -jar vosp-api-wrapper-java.jar \
-            -vid $VERACODE_API_ID \
-            -vkey $VERACODE_API_KEY \
-            -action UploadAndScan \
-            -appname "$APP_NAME" \
-            -createprofile true \
-            -autoscan true \
-            -filepath "veracode_upload_bundle.zip" \
-            -version "Build ${CODEBUILD_BUILD_NUMBER}"
-        
-        elif [ "${SCAN_TYPE}" = "sandbox" ] || is_release_branch; then
-          echo "=== Ejecutando Sandbox Scan para Release ==="
-          
-          echo "Descargando Veracode Java API Wrapper..."
-          mkdir -p .veracode
-          VERSION=$(curl -sS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
-          if [ -z "$VERSION" ]; then
-            echo "ERROR: No se pudo obtener la version del API Wrapper"
-            exit 1
-          fi
-          echo "Descargando version: $VERSION"
-          curl -sSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
-          cd .veracode && unzip -o dist.zip && cd ..
-          JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
-          if [ -z "$JAR_PATH" ]; then
-            echo "ERROR: No se encontro VeracodeJavaAPI.jar"
-            exit 1
-          fi
-          cp "$JAR_PATH" vosp-api-wrapper-java.jar
-          
-          echo "Subiendo bundle a Veracode Sandbox..."
-          echo "Archivo: veracode_upload_bundle.zip"
-          java -jar vosp-api-wrapper-java.jar \
-            -vid $VERACODE_API_ID \
-            -vkey $VERACODE_API_KEY \
-            -action UploadAndScan \
-            -appname "$APP_NAME" \
-            -createprofile true \
-            -autoscan true \
-            -sandboxname "$SANDBOX_NAME" \
-            -createsandbox true \
-            -filepath "veracode_upload_bundle.zip" \
-            -version "Release ${CODEBUILD_BUILD_NUMBER}"
-        
-        elif [ "${SCAN_TYPE}" = "pipeline-gate" ]; then
-          echo "=== Ejecutando Pipeline Scan con Policy Gate (todos los artefactos) ==="
-          
-          echo "Descargando Veracode Pipeline Scanner..."
-          curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
-          unzip -o pipeline-scan-LATEST.zip
-          
-          if [ ! -f "pipeline-scan.jar" ]; then
-            echo "ERROR: No se pudo descargar pipeline-scan.jar"
-            exit 1
-          fi
-          
-          mkdir -p scan_results
-          FAILED=0
-          SCAN_COUNT=0
-          FAILED_ARTIFACTS=""
-          
-          while IFS= read -r artifact; do
-            # Saltar el bundle zip
-            if [[ "$artifact" == *"veracode_upload_bundle.zip" ]]; then
-              continue
-            fi
-            SCAN_COUNT=$((SCAN_COUNT + 1))
-            ARTIFACT_NAME=$(basename "$artifact")
-            echo ""
-            echo "=========================================="
-            echo "Escaneando [$SCAN_COUNT]: $ARTIFACT_NAME"
-            echo "=========================================="
-            
-            if ! java -jar pipeline-scan.jar \
-              -f "$artifact" \
-              -vid $VERACODE_API_ID \
-              -vkey $VERACODE_API_KEY \
-              --issue_details true \
-              --policy_name "Veracode Recommended Very High" \
-              -jo true; then
-              FAILED=1
-              FAILED_ARTIFACTS="$FAILED_ARTIFACTS $ARTIFACT_NAME"
-              echo "ADVERTENCIA: Policy gate fallido para: $ARTIFACT_NAME"
-            fi
-            
-            # Guardar resultados con nombre unico
-            if [ -f "results.json" ]; then
-              mv results.json "scan_results/results_${ARTIFACT_NAME}.json"
-            fi
-          done < artifact_list.txt
-          
-          echo ""
-          echo "=========================================="
-          echo "Pipeline Scan completado para $SCAN_COUNT artefactos"
-          if [ $FAILED -eq 1 ]; then
-            echo "ERROR: Policy gate fallido para:$FAILED_ARTIFACTS"
-            exit 1
-          fi
-          echo "=========================================="
-        
-        else
-          echo "=== Ejecutando Pipeline Scan (por defecto para feature branches, todos los artefactos) ==="
-          
-          echo "Descargando Veracode Pipeline Scanner..."
-          curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
-          unzip -o pipeline-scan-LATEST.zip
-          
-          if [ ! -f "pipeline-scan.jar" ]; then
-            echo "ERROR: No se pudo descargar pipeline-scan.jar"
-            exit 1
-          fi
-          
-          mkdir -p scan_results
-          SCAN_COUNT=0
-          
-          while IFS= read -r artifact; do
-            # Saltar el bundle zip
-            if [[ "$artifact" == *"veracode_upload_bundle.zip" ]]; then
-              continue
-            fi
-            SCAN_COUNT=$((SCAN_COUNT + 1))
-            ARTIFACT_NAME=$(basename "$artifact")
-            echo ""
-            echo "=========================================="
-            echo "Escaneando [$SCAN_COUNT]: $ARTIFACT_NAME"
-            echo "=========================================="
-            
-            java -jar pipeline-scan.jar \
-              -f "$artifact" \
-              -vid $VERACODE_API_ID \
-              -vkey $VERACODE_API_KEY \
-              --fail_on_severity "" \
-              --issue_details true \
-              -jo true \
-              || echo "Pipeline scan completado con hallazgos para $ARTIFACT_NAME"
-            
-            # Guardar resultados con nombre unico
-            if [ -f "results.json" ]; then
-              mv results.json "scan_results/results_${ARTIFACT_NAME}.json"
-            fi
-          done < artifact_list.txt
-          
-          echo ""
-          echo "=========================================="
-          echo "Pipeline Scan completado para $SCAN_COUNT artefactos"
-          echo "=========================================="
-        fi
-  
-  post_build:
-    commands:
-      - echo "Build completado el $(date)"
-      - echo "Artefactos de escaneo disponibles en verascan y scan_results"
+pr:
+  branches:
+    include:
+      - main
 
-artifacts:
-  files:
-    - 'verascan/**/*'
-    - 'artifact_list.txt'
-    - 'veracode_upload_bundle.zip'
-    - 'scan_results/**/*'
-  name: veracode-scan-artifacts
+variables:
+  - group: veracode-credentials
+  - name: APP_NAME
+    value: 'Azure_Application'
+  - name: SANDBOX_NAME
+    value: 'azure-release'
 
-cache:
-  paths:
-    - '/root/.m2/**/*'
-    - '/root/.gradle/**/*'
-    - 'node_modules/**/*'
-    - '.nuget/**/*'
+pool:
+  vmImage: 'ubuntu-latest'
+
+# =============================================================================
+# Stage 1: Instalar Veracode CLI + Autopackager
+# =============================================================================
+stages:
+  - stage: Package
+    displayName: 'Instalar y empaquetar'
+    jobs:
+      - job: PackageApp
+        displayName: 'Veracode CLI autopackager'
+        steps:
+          - script: |
+              echo "Instalando prerrequisitos..."
+              sudo apt-get update && sudo apt-get install -y curl unzip grep
+            displayName: 'Instalar prerrequisitos'
+
+          - script: |
+              echo "Instalando Veracode CLI..."
+              curl -fsS -O https://tools.veracode.com/veracode-cli/install
+              chmod +x ./install
+              ./install
+              if [ -f "./veracode" ]; then
+                chmod +x veracode
+                ./veracode version
+              else
+                echo "##vso[task.logissue type=error]Veracode CLI no se instalo correctamente"
+                exit 1
+              fi
+            displayName: 'Instalar Veracode CLI'
+
+          - script: |
+              if [ -z "$VERACODE_API_ID" ] || [ -z "$VERACODE_API_KEY" ]; then
+                echo "##vso[task.logissue type=error]VERACODE_API_ID y VERACODE_API_KEY son requeridos"
+                echo "Configurar en variable groups de Azure Pipelines o Key Vault"
+                exit 1
+              fi
+              echo "Credenciales de Veracode verificadas"
+            displayName: 'Validar credenciales Veracode'
+            env:
+              VERACODE_API_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY: $(VERACODE_API_KEY)
+
+          - script: |
+              echo "Ejecutando autopackager de Veracode..."
+              mkdir -p verascan
+              ./veracode package --source "$(Build.SourcesDirectory)" --output verascan --trust
+              echo "Artefactos empaquetados:"
+              ls -lhR verascan
+            displayName: 'Veracode autopackager'
+
+          # --- Listar y validar todos los artefactos encontrados ---
+          - script: |
+              echo "Listando todos los artefactos empaquetados..."
+              find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
+              
+              if [ ! -s artifact_list.txt ]; then
+                echo "##vso[task.logissue type=error]No se encontraron artefactos empaquetados"
+                ls -lR verascan
+                exit 1
+              fi
+              
+              echo "Artefactos encontrados:"
+              cat artifact_list.txt
+              
+              ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
+              echo "Total de artefactos: $ARTIFACT_COUNT"
+              echo "##vso[task.setvariable variable=ARTIFACT_COUNT;isOutput=true]$ARTIFACT_COUNT"
+            name: ListArtifacts
+            displayName: 'Listar y validar artefactos'
+
+          # --- Crear carpeta de upload para Policy/Sandbox scans ---
+          - script: |
+              echo "Creando carpeta de artefactos para escaneos de plataforma..."
+              mkdir -p upload_bundle
+              
+              while IFS= read -r artifact; do
+                echo "Copiando: $artifact"
+                cp "$artifact" upload_bundle/
+              done < artifact_list.txt
+              
+              echo "Artefactos listos para upload:"
+              ls -lh upload_bundle/
+            displayName: 'Preparar carpeta de upload'
+
+          # --- Copiar al directorio de artefactos ---
+          - script: |
+              cp artifact_list.txt verascan/
+            displayName: 'Preparar artefactos para publicar'
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+              artifactName: 'verascan'
+            displayName: 'Publicar artefactos empaquetados'
+
+  # =============================================================================
+  # Stage 2: SCA (todos los branches)
+  # =============================================================================
+  - stage: SCA
+    displayName: 'Escaneo SCA'
+    dependsOn: Package
+    jobs:
+      - job: SCAScan
+        displayName: 'Veracode Agent-Based SCA'
+        steps:
+          - checkout: self
+          - script: |
+              echo "Ejecutando Veracode Agent-Based SCA..."
+              curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
+            displayName: 'Escaneo Veracode SCA'
+            env:
+              SRCCLR_API_TOKEN: $(SRCCLR_API_TOKEN)
+
+  # =============================================================================
+  # Stage 3a: Pipeline Scan - Feature Branches (sin gate, cada artefacto)
+  # =============================================================================
+  - stage: PipelineScan
+    displayName: 'Pipeline Scan (feature)'
+    dependsOn: Package
+    condition: |
+      and(
+        succeeded(),
+        ne(variables['Build.Reason'], 'PullRequest'),
+        startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/'),
+        ne(variables['Build.SourceBranch'], 'refs/heads/main')
+      )
+    jobs:
+      - job: PipelineScanJob
+        displayName: 'Veracode Pipeline Scan (todos los artefactos)'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'verascan'
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+
+          - script: |
+              echo "Descargando Veracode Pipeline Scanner..."
+              curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+              unzip -o pipeline-scan-LATEST.zip
+              if [ ! -f "pipeline-scan.jar" ]; then
+                echo "##vso[task.logissue type=error]No se pudo descargar pipeline-scan.jar"
+                exit 1
+              fi
+            displayName: 'Descargar Pipeline Scanner'
+
+          - script: |
+              echo "Ejecutando Pipeline Scan en cada artefacto..."
+              mkdir -p scan_results
+              SCAN_COUNT=0
+              
+              # Usar artifact_list.txt creado durante empaquetado (excluye bundle)
+              while IFS= read -r artifact; do
+                # Saltar el bundle zip
+                if [[ "$artifact" == *"veracode_upload_bundle.zip" ]]; then
+                  continue
+                fi
+                SCAN_COUNT=$((SCAN_COUNT + 1))
+                ARTIFACT_NAME=$(basename "$artifact")
+                echo ""
+                echo "=========================================="
+                echo "Escaneando [$SCAN_COUNT]: $ARTIFACT_NAME"
+                echo "=========================================="
+                
+                java -jar pipeline-scan.jar \
+                  -f "$artifact" \
+                  -vid $VERACODE_API_ID \
+                  -vkey $VERACODE_API_KEY \
+                  --fail_on_severity "" \
+                  --issue_details true \
+                  -jo true \
+                  || echo "Pipeline scan completado con hallazgos para $ARTIFACT_NAME"
+                
+                # Renombrar archivo de resultados con prefijo del nombre del artefacto
+                if [ -f "results.json" ]; then
+                  mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+                  echo "Resultados guardados: scan_results/${ARTIFACT_NAME}_results.json"
+                else
+                  echo "ADVERTENCIA: No se produjo results.json para $ARTIFACT_NAME (el artefacto puede no ser escaneable)"
+                fi
+              done < verascan/artifact_list.txt
+              
+              echo ""
+              echo "=========================================="
+              echo "Pipeline Scan completado para $SCAN_COUNT artefactos"
+              echo "=========================================="
+            displayName: 'Pipeline Scan (sin gate, todos los artefactos)'
+            env:
+              VERACODE_API_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY: $(VERACODE_API_KEY)
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/scan_results'
+              artifactName: 'veracode-pipeline-results'
+            condition: succeededOrFailed()
+            displayName: 'Publicar resultados Pipeline Scan'
+
+  # =============================================================================
+  # Stage 3b: Pipeline Scan - Pull Requests (gate habilitado, cada artefacto)
+  # =============================================================================
+  - stage: PipelineScanGate
+    displayName: 'Pipeline Scan (PR gate)'
+    dependsOn: Package
+    condition: |
+      and(
+        succeeded(),
+        eq(variables['Build.Reason'], 'PullRequest')
+      )
+    jobs:
+      - job: PipelineScanGateJob
+        displayName: 'Veracode Pipeline Scan con gate (todos los artefactos)'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'verascan'
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+
+          - script: |
+              echo "Descargando Veracode Pipeline Scanner..."
+              curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+              unzip -o pipeline-scan-LATEST.zip
+              if [ ! -f "pipeline-scan.jar" ]; then
+                echo "##vso[task.logissue type=error]No se pudo descargar pipeline-scan.jar"
+                exit 1
+              fi
+            displayName: 'Descargar Pipeline Scanner'
+
+          - script: |
+              echo "Ejecutando Pipeline Scan con Policy Gate en cada artefacto..."
+              mkdir -p scan_results
+              FAILED=0
+              SCAN_COUNT=0
+              FAILED_ARTIFACTS=""
+              
+              # Usar artifact_list.txt creado durante empaquetado (excluye bundle)
+              while IFS= read -r artifact; do
+                # Saltar el bundle zip
+                if [[ "$artifact" == *"veracode_upload_bundle.zip" ]]; then
+                  continue
+                fi
+                SCAN_COUNT=$((SCAN_COUNT + 1))
+                ARTIFACT_NAME=$(basename "$artifact")
+                echo ""
+                echo "=========================================="
+                echo "Escaneando [$SCAN_COUNT]: $ARTIFACT_NAME"
+                echo "=========================================="
+                
+                if ! java -jar pipeline-scan.jar \
+                  -f "$artifact" \
+                  -vid $VERACODE_API_ID \
+                  -vkey $VERACODE_API_KEY \
+                  --issue_details true \
+                  --policy_name "Veracode Recommended Very High" \
+                  -jo true; then
+                  FAILED=1
+                  FAILED_ARTIFACTS="$FAILED_ARTIFACTS $ARTIFACT_NAME"
+                  echo "##vso[task.logissue type=warning]Policy gate fallido para: $ARTIFACT_NAME"
+                fi
+                
+                # Renombrar archivo de resultados con prefijo del nombre del artefacto
+                if [ -f "results.json" ]; then
+                  mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+                  echo "Resultados guardados: scan_results/${ARTIFACT_NAME}_results.json"
+                else
+                  echo "ADVERTENCIA: No se produjo results.json para $ARTIFACT_NAME (el artefacto puede no ser escaneable)"
+                fi
+              done < verascan/artifact_list.txt
+              
+              echo ""
+              echo "=========================================="
+              echo "Pipeline Scan completado para $SCAN_COUNT artefactos"
+              if [ $FAILED -eq 1 ]; then
+                echo "##vso[task.logissue type=error]Policy gate fallido para:$FAILED_ARTIFACTS"
+                echo "Artefactos con violaciones de politica:$FAILED_ARTIFACTS"
+              fi
+              echo "=========================================="
+              
+              exit $FAILED
+            displayName: 'Pipeline Scan (gate habilitado, todos los artefactos)'
+            env:
+              VERACODE_API_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY: $(VERACODE_API_KEY)
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/scan_results'
+              artifactName: 'veracode-pipeline-gate-results'
+            condition: succeededOrFailed()
+            displayName: 'Publicar resultados Pipeline Scan'
+
+  # =============================================================================
+  # Stage 4: Sandbox Scan - Release Branches (bundle zip)
+  # =============================================================================
+  - stage: SandboxScan
+    displayName: 'Sandbox Scan (release)'
+    dependsOn: Package
+    condition: |
+      and(
+        succeeded(),
+        startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')
+      )
+    jobs:
+      - job: SandboxScanJob
+        displayName: 'Veracode Sandbox Scan'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'verascan'
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+
+          - script: |
+              echo "Artefactos para upload:"
+              ls -lh upload_bundle/
+            displayName: 'Listar artefactos para upload'
+
+          - script: |
+              echo "Descargando Veracode Java API Wrapper..."
+              mkdir -p .veracode
+              VERSION=$(curl -sS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+              if [ -z "$VERSION" ]; then
+                echo "##vso[task.logissue type=error]No se pudo obtener la version del API Wrapper"
+                exit 1
+              fi
+              echo "Descargando version: $VERSION"
+              curl -sSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
+              cd .veracode && unzip -o dist.zip && cd ..
+              JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+              if [ -z "$JAR_PATH" ]; then
+                echo "##vso[task.logissue type=error]No se encontro VeracodeJavaAPI.jar"
+                exit 1
+              fi
+              cp "$JAR_PATH" vosp-api-wrapper-java.jar
+            displayName: 'Descargar Veracode API Wrapper'
+
+          - script: |
+              echo "Subiendo artefactos a Veracode Sandbox..."
+              java -jar vosp-api-wrapper-java.jar \
+                -vid $VERACODE_API_ID \
+                -vkey $VERACODE_API_KEY \
+                -action UploadAndScan \
+                -appname "$(APP_NAME)" \
+                -createprofile true \
+                -autoscan true \
+                -sandboxname "$(SANDBOX_NAME)" \
+                -createsandbox true \
+                -filepath "upload_bundle" \
+                -version "Release $(Build.BuildNumber)"
+            displayName: 'Veracode Sandbox Scan'
+            env:
+              VERACODE_API_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY: $(VERACODE_API_KEY)
+
+  # =============================================================================
+  # Stage 5: Policy Scan - Branch Main
+  # =============================================================================
+  - stage: PolicyScan
+    displayName: 'Policy Scan (produccion)'
+    dependsOn: Package
+    condition: |
+      and(
+        succeeded(),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        ne(variables['Build.Reason'], 'PullRequest')
+      )
+    jobs:
+      - job: PolicyScanJob
+        displayName: 'Veracode Policy Scan'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'verascan'
+              targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+
+          - script: |
+              echo "Artefactos para upload:"
+              ls -lh upload_bundle/
+            displayName: 'Listar artefactos para upload'
+
+          - script: |
+              echo "Descargando Veracode Java API Wrapper..."
+              mkdir -p .veracode
+              VERSION=$(curl -sS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+              if [ -z "$VERSION" ]; then
+                echo "##vso[task.logissue type=error]No se pudo obtener la version del API Wrapper"
+                exit 1
+              fi
+              echo "Descargando version: $VERSION"
+              curl -sSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
+              cd .veracode && unzip -o dist.zip && cd ..
+              JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+              if [ -z "$JAR_PATH" ]; then
+                echo "##vso[task.logissue type=error]No se encontro VeracodeJavaAPI.jar"
+                exit 1
+              fi
+              cp "$JAR_PATH" vosp-api-wrapper-java.jar
+            displayName: 'Descargar Veracode API Wrapper'
+
+          - script: |
+              echo "Subiendo artefactos a la Plataforma Veracode..."
+              java -jar vosp-api-wrapper-java.jar \
+                -vid $VERACODE_API_ID \
+                -vkey $VERACODE_API_KEY \
+                -action UploadAndScan \
+                -appname "$(APP_NAME)" \
+                -createprofile true \
+                -autoscan true \
+                -filepath "upload_bundle" \
+                -version "Build $(Build.BuildNumber)"
+            displayName: 'Veracode Policy Scan'
+            env:
+              VERACODE_API_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY: $(VERACODE_API_KEY)
