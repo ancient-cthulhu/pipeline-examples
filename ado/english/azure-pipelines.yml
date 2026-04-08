@@ -105,21 +105,7 @@ stages:
             name: ListArtifacts
             displayName: 'List and validate artifacts'
 
-          # --- Create upload folder for Policy/Sandbox scans ---
-          - script: |
-              echo "Creating artifact folder for platform scans..."
-              mkdir -p upload_bundle
-              
-              while IFS= read -r artifact; do
-                echo "Copying: $artifact"
-                cp "$artifact" upload_bundle/
-              done < artifact_list.txt
-              
-              echo "Artifacts ready for upload:"
-              ls -lh upload_bundle/
-            displayName: 'Prepare upload folder'
-
-          # --- Copy to artifacts directory ---
+          # --- Copy artifact list to verascan for publishing ---
           - script: |
               cp artifact_list.txt verascan/
             displayName: 'Prepare artifacts for publishing'
@@ -349,7 +335,7 @@ stages:
 
           - script: |
               echo "Artifacts to upload:"
-              ls -lh upload_bundle/
+              ls -lh verascan/
             displayName: 'List artifacts for upload'
 
           - script: |
@@ -382,7 +368,7 @@ stages:
                 -autoscan true \
                 -sandboxname "$(SANDBOX_NAME)" \
                 -createsandbox true \
-                -filepath "upload_bundle" \
+                -filepath "verascan" \
                 -version "Release $(Build.BuildNumber)"
             displayName: 'Veracode Sandbox Scan'
             env:
@@ -412,7 +398,7 @@ stages:
 
           - script: |
               echo "Artifacts to upload:"
-              ls -lh upload_bundle/
+              ls -lh verascan/
             displayName: 'List artifacts for upload'
 
           - script: |
@@ -443,7 +429,7 @@ stages:
                 -appname "$(APP_NAME)" \
                 -createprofile true \
                 -autoscan true \
-                -filepath "upload_bundle" \
+                -filepath "verascan" \
                 -version "Build $(Build.BuildNumber)"
             displayName: 'Veracode Policy Scan'
             env:
