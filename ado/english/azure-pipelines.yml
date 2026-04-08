@@ -28,8 +28,8 @@ pr:
 
 variables:
   - group: veracode-credentials
-  - name: APP_NAME
-    value: 'Azure_Application'
+  # APP_NAME is built dynamically from org/project/repo
+  # Override VERACODE_APP_NAME in variable group if you want a custom name
   - name: SANDBOX_NAME
     value: 'azure-release'
 
@@ -76,6 +76,24 @@ stages:
             env:
               VERACODE_API_ID: $(VERACODE_API_ID)
               VERACODE_API_KEY: $(VERACODE_API_KEY)
+
+          # --- Build APP_NAME from org/project/repo ---
+          - script: |
+              # Extract org name from collection URI (e.g., https://dev.azure.com/myorg/)
+              ORG_NAME=$(echo "$(System.TeamFoundationCollectionUri)" | sed -E 's|https://dev.azure.com/([^/]+)/?|\1|' | sed -E 's|https://([^.]+).visualstudio.com/?|\1|')
+              PROJECT_NAME="$(System.TeamProject)"
+              REPO_NAME="$(Build.Repository.Name)"
+              
+              # Use custom name if provided, otherwise build from org/project/repo
+              if [ -n "$(VERACODE_APP_NAME)" ]; then
+                APP_NAME="$(VERACODE_APP_NAME)"
+              else
+                APP_NAME="${ORG_NAME}/${PROJECT_NAME}/${REPO_NAME}"
+              fi
+              
+              echo "Veracode Application Profile: $APP_NAME"
+              echo "##vso[task.setvariable variable=APP_NAME]$APP_NAME"
+            displayName: 'Set Veracode app name'
 
           - script: |
               echo "Running Veracode Autopackager..."
