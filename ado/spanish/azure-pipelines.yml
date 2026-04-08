@@ -330,7 +330,7 @@ stages:
             displayName: 'Publicar resultados Pipeline Scan'
 
   # =============================================================================
-  # Stage 4: Sandbox Scan - Release Branches (bundle zip)
+  # Stage 4: Sandbox Scan - Release Branches
   # =============================================================================
   - stage: SandboxScan
     displayName: 'Sandbox Scan (release)'
@@ -348,6 +348,19 @@ stages:
             inputs:
               artifactName: 'verascan'
               targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+
+          - script: |
+              ORG_NAME=$(echo "$(System.TeamFoundationCollectionUri)" | sed -E 's|https://dev.azure.com/([^/]+)/?|\1|' | sed -E 's|https://([^.]+).visualstudio.com/?|\1|')
+              PROJECT_NAME="$(System.TeamProject)"
+              REPO_NAME="$(Build.Repository.Name)"
+              if [ -n "$(VERACODE_APP_NAME)" ]; then
+                APP_NAME="$(VERACODE_APP_NAME)"
+              else
+                APP_NAME="${ORG_NAME}/${PROJECT_NAME}/${REPO_NAME}"
+              fi
+              echo "Perfil de Aplicacion Veracode: $APP_NAME"
+              echo "##vso[task.setvariable variable=APP_NAME]$APP_NAME"
+            displayName: 'Configurar nombre de app Veracode'
 
           - script: |
               echo "Artefactos para upload:"
@@ -411,6 +424,19 @@ stages:
             inputs:
               artifactName: 'verascan'
               targetPath: '$(System.DefaultWorkingDirectory)/verascan'
+
+          - script: |
+              ORG_NAME=$(echo "$(System.TeamFoundationCollectionUri)" | sed -E 's|https://dev.azure.com/([^/]+)/?|\1|' | sed -E 's|https://([^.]+).visualstudio.com/?|\1|')
+              PROJECT_NAME="$(System.TeamProject)"
+              REPO_NAME="$(Build.Repository.Name)"
+              if [ -n "$(VERACODE_APP_NAME)" ]; then
+                APP_NAME="$(VERACODE_APP_NAME)"
+              else
+                APP_NAME="${ORG_NAME}/${PROJECT_NAME}/${REPO_NAME}"
+              fi
+              echo "Perfil de Aplicacion Veracode: $APP_NAME"
+              echo "##vso[task.setvariable variable=APP_NAME]$APP_NAME"
+            displayName: 'Configurar nombre de app Veracode'
 
           - script: |
               echo "Artefactos para upload:"
