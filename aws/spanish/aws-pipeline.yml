@@ -79,19 +79,6 @@ phases:
         ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
         echo "Total de artefactos: $ARTIFACT_COUNT"
       
-      # Crear carpeta de upload para Policy/Sandbox scans
-      - |
-        echo "Creando carpeta de artefactos para escaneos de plataforma..."
-        mkdir -p upload_bundle
-        
-        while IFS= read -r artifact; do
-          echo "Copiando: $artifact"
-          cp "$artifact" upload_bundle/
-        done < artifact_list.txt
-        
-        echo "Artefactos listos para upload:"
-        ls -lh upload_bundle/
-      
       - echo "Ejecutando Veracode Agent-Based SCA..."
       - curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
       
@@ -134,7 +121,7 @@ phases:
             -appname "$APP_NAME" \
             -createprofile true \
             -autoscan true \
-            -filepath "upload_bundle" \
+            -filepath "verascan" \
             -version "Build ${CODEBUILD_BUILD_NUMBER}"
         
         elif [ "${SCAN_TYPE}" = "sandbox" ] || is_release_branch; then
@@ -167,7 +154,7 @@ phases:
             -autoscan true \
             -sandboxname "$SANDBOX_NAME" \
             -createsandbox true \
-            -filepath "upload_bundle" \
+            -filepath "verascan" \
             -version "Release ${CODEBUILD_BUILD_NUMBER}"
         
         elif [ "${SCAN_TYPE}" = "pipeline-gate" ]; then
@@ -289,7 +276,6 @@ artifacts:
   files:
     - 'verascan/**/*'
     - 'artifact_list.txt'
-    - 'upload_bundle/**/*'
     - 'scan_results/**/*'
   name: veracode-scan-artifacts
 
