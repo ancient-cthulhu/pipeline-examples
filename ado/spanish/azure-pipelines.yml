@@ -225,7 +225,7 @@ stages:
                 -vkey $VERACODE_API_KEY \
                 --fail_on_severity "Very High, High" \
                 --issue_details true \
-                --policy "Veracode Recommended Very High"
+                --policy_name "Veracode Recommended Very High"
             displayName: 'Pipeline Scan (gate habilitado)'
             env:
               VERACODE_API_ID: $(VERACODE_API_ID)
