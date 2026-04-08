@@ -48,7 +48,7 @@ stages:
         steps:
           - script: |
               echo "Installing prerequisites..."
-              sudo apt-get update && sudo apt-get install -y curl unzip grep zip
+              sudo apt-get update && sudo apt-get install -y curl unzip grep
             displayName: 'Install prerequisites'
 
           - script: |
@@ -105,9 +105,9 @@ stages:
             name: ListArtifacts
             displayName: 'List and validate artifacts'
 
-          # --- Create bundle zip for Policy/Sandbox scans ---
+          # --- Create upload folder for Policy/Sandbox scans ---
           - script: |
-              echo "Creating artifact bundle for platform scans..."
+              echo "Creating artifact folder for platform scans..."
               mkdir -p upload_bundle
               
               while IFS= read -r artifact; do
@@ -115,18 +115,12 @@ stages:
                 cp "$artifact" upload_bundle/
               done < artifact_list.txt
               
-              cd upload_bundle
-              zip -r ../veracode_upload_bundle.zip .
-              cd ..
-              
-              echo "Bundle created:"
-              ls -lh veracode_upload_bundle.zip
-              unzip -l veracode_upload_bundle.zip
-            displayName: 'Create upload bundle'
+              echo "Artifacts ready for upload:"
+              ls -lh upload_bundle/
+            displayName: 'Prepare upload folder'
 
-          # --- Copy bundle to artifacts directory ---
+          # --- Copy to artifacts directory ---
           - script: |
-              cp veracode_upload_bundle.zip verascan/
               cp artifact_list.txt verascan/
             displayName: 'Prepare artifacts for publishing'
 
@@ -213,9 +207,12 @@ stages:
                   -jo true \
                   || echo "Pipeline scan completed with findings for $ARTIFACT_NAME"
                 
-                # Save results with unique name
+                # Rename results file with artifact name prefix
                 if [ -f "results.json" ]; then
-                  mv results.json "scan_results/results_${ARTIFACT_NAME}.json"
+                  mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+                  echo "Results saved: scan_results/${ARTIFACT_NAME}_results.json"
+                else
+                  echo "WARNING: No results.json produced for $ARTIFACT_NAME (artifact may not be scannable)"
                 fi
               done < verascan/artifact_list.txt
               
@@ -232,8 +229,9 @@ stages:
             inputs:
               targetPath: '$(System.DefaultWorkingDirectory)/scan_results'
               artifactName: 'veracode-pipeline-results'
-            condition: succeededOrFailed()
+            condition: and(succeededOrFailed(), ne(variables['Agent.JobStatus'], 'Canceled'))
             displayName: 'Publish Pipeline Scan results'
+            continueOnError: true
 
   # =============================================================================
   # Stage 3b: Pipeline Scan - Pull Requests (gate enabled, each artifact)
@@ -297,9 +295,12 @@ stages:
                   echo "##vso[task.logissue type=warning]Policy gate failed for: $ARTIFACT_NAME"
                 fi
                 
-                # Save results with unique name
+                # Rename results file with artifact name prefix
                 if [ -f "results.json" ]; then
-                  mv results.json "scan_results/results_${ARTIFACT_NAME}.json"
+                  mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+                  echo "Results saved: scan_results/${ARTIFACT_NAME}_results.json"
+                else
+                  echo "WARNING: No results.json produced for $ARTIFACT_NAME (artifact may not be scannable)"
                 fi
               done < verascan/artifact_list.txt
               
@@ -322,8 +323,9 @@ stages:
             inputs:
               targetPath: '$(System.DefaultWorkingDirectory)/scan_results'
               artifactName: 'veracode-pipeline-gate-results'
-            condition: succeededOrFailed()
+            condition: and(succeededOrFailed(), ne(variables['Agent.JobStatus'], 'Canceled'))
             displayName: 'Publish Pipeline Scan results'
+            continueOnError: true
 
   # =============================================================================
   # Stage 4: Sandbox Scan - Release Branches (bundle zip)
@@ -346,16 +348,9 @@ stages:
               targetPath: '$(System.DefaultWorkingDirectory)/verascan'
 
           - script: |
-              UPLOAD_FILE=$(find verascan -name "veracode_upload_bundle.zip" | head -n1)
-              if [ -z "$UPLOAD_FILE" ]; then
-                echo "##vso[task.logissue type=error]veracode_upload_bundle.zip not found"
-                exit 1
-              fi
-              echo "Upload bundle: $UPLOAD_FILE"
-              echo "Bundle contents:"
-              unzip -l "$UPLOAD_FILE"
-              echo "##vso[task.setvariable variable=UPLOAD_FILE]$UPLOAD_FILE"
-            displayName: 'Locate artifact bundle'
+              echo "Artifacts to upload:"
+              ls -lh upload_bundle/
+            displayName: 'List artifacts for upload'
 
           - script: |
               echo "Downloading Veracode Java API Wrapper..."
@@ -377,8 +372,7 @@ stages:
             displayName: 'Download Veracode API Wrapper'
 
           - script: |
-              echo "Uploading bundle to Veracode Sandbox..."
-              echo "File: $(UPLOAD_FILE)"
+              echo "Uploading artifacts to Veracode Sandbox..."
               java -jar vosp-api-wrapper-java.jar \
                 -vid $VERACODE_API_ID \
                 -vkey $VERACODE_API_KEY \
@@ -388,7 +382,7 @@ stages:
                 -autoscan true \
                 -sandboxname "$(SANDBOX_NAME)" \
                 -createsandbox true \
-                -filepath "$(UPLOAD_FILE)" \
+                -filepath "upload_bundle" \
                 -version "Release $(Build.BuildNumber)"
             displayName: 'Veracode Sandbox Scan'
             env:
@@ -417,16 +411,9 @@ stages:
               targetPath: '$(System.DefaultWorkingDirectory)/verascan'
 
           - script: |
-              UPLOAD_FILE=$(find verascan -name "veracode_upload_bundle.zip" | head -n1)
-              if [ -z "$UPLOAD_FILE" ]; then
-                echo "##vso[task.logissue type=error]veracode_upload_bundle.zip not found"
-                exit 1
-              fi
-              echo "Upload bundle: $UPLOAD_FILE"
-              echo "Bundle contents:"
-              unzip -l "$UPLOAD_FILE"
-              echo "##vso[task.setvariable variable=UPLOAD_FILE]$UPLOAD_FILE"
-            displayName: 'Locate artifact bundle'
+              echo "Artifacts to upload:"
+              ls -lh upload_bundle/
+            displayName: 'List artifacts for upload'
 
           - script: |
               echo "Downloading Veracode Java API Wrapper..."
@@ -448,8 +435,7 @@ stages:
             displayName: 'Download Veracode API Wrapper'
 
           - script: |
-              echo "Uploading bundle to Veracode Platform..."
-              echo "File: $(UPLOAD_FILE)"
+              echo "Uploading artifacts to Veracode Platform..."
               java -jar vosp-api-wrapper-java.jar \
                 -vid $VERACODE_API_ID \
                 -vkey $VERACODE_API_KEY \
@@ -457,7 +443,7 @@ stages:
                 -appname "$(APP_NAME)" \
                 -createprofile true \
                 -autoscan true \
-                -filepath "$(UPLOAD_FILE)" \
+                -filepath "upload_bundle" \
                 -version "Build $(Build.BuildNumber)"
             displayName: 'Veracode Policy Scan'
             env:
