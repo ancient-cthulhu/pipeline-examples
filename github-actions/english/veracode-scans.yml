@@ -1,0 +1,354 @@
+name: CI - Veracode
+
+# Veracode Security Scanning for GitHub Actions (Multi-Artifact Support)
+#
+# Required secrets:
+#   - VERACODE_API_ID: Veracode API ID
+#   - VERACODE_API_KEY: Veracode API Key
+#   - SRCCLR_API_TOKEN: SCA Agent token (optional)
+#
+# Scan type is auto-detected by branch/event:
+#   feature/*  -> Pipeline Scan (no gate) - each artifact individually
+#   PR         -> Pipeline Scan (gate on Very High/High) - each artifact individually
+#   release/*  -> Sandbox Scan - all artifacts uploaded to folder
+#   main       -> Policy Scan - all artifacts uploaded to folder
+#
+# APP_NAME format: {org}/{repo} (customizable via VERACODE_APP_NAME secret)
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/*'
+      - 'feature/*'
+  pull_request: {}
+
+permissions:
+  contents: read
+
+env:
+  VERACODE_API_ID: ${{ secrets.VERACODE_API_ID }}
+  VERACODE_API_KEY: ${{ secrets.VERACODE_API_KEY }}
+
+jobs:
+  # =============================================================================
+  # PACKAGE: Build and package artifacts with Veracode CLI
+  # =============================================================================
+  package:
+    name: Package Artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_count: ${{ steps.list-artifacts.outputs.artifact_count }}
+      app_name: ${{ steps.set-app-name.outputs.app_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set Veracode App Name
+        id: set-app-name
+        run: |
+          if [ -n "${{ secrets.VERACODE_APP_NAME }}" ]; then
+            APP_NAME="${{ secrets.VERACODE_APP_NAME }}"
+          else
+            APP_NAME="${{ github.repository }}"
+          fi
+          echo "Veracode Application Profile: $APP_NAME"
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+
+      - name: Install Veracode CLI
+        run: |
+          curl -fsS -O https://tools.veracode.com/veracode-cli/install
+          chmod +x ./install
+          ./install
+          ./veracode version
+
+      - name: Run Veracode Autopackager
+        run: |
+          mkdir -p verascan
+          ./veracode package --source . --output verascan --trust
+          echo "Packaged artifacts:"
+          ls -lhR verascan
+
+      - name: List and Validate Artifacts
+        id: list-artifacts
+        run: |
+          find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
+          
+          if [ ! -s artifact_list.txt ]; then
+            echo "::error::No packaged artifacts found"
+            ls -lR verascan
+            exit 1
+          fi
+          
+          echo "Artifacts found:"
+          cat artifact_list.txt
+          
+          ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
+          echo "Total artifacts: $ARTIFACT_COUNT"
+          echo "artifact_count=$ARTIFACT_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: verascan
+          path: |
+            verascan/
+            artifact_list.txt
+
+  # =============================================================================
+  # SCA: Agent-Based SCA (runs on all branches)
+  # =============================================================================
+  sca:
+    name: Agent-Based SCA
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Veracode SCA
+        env:
+          SRCCLR_API_TOKEN: ${{ secrets.SRCCLR_API_TOKEN }}
+        run: |
+          curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
+
+  # =============================================================================
+  # FEATURE: feature/* -> Pipeline Scan (no gate, each artifact)
+  # =============================================================================
+  feature-pipeline-scan:
+    name: Pipeline Scan (feature/*)
+    needs: package
+    if: github.event_name == 'push' && startsWith(github.ref_name, 'feature/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: verascan
+
+      - name: Download Pipeline Scanner
+        run: |
+          curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -o pipeline-scan-LATEST.zip
+          if [ ! -f "pipeline-scan.jar" ]; then
+            echo "::error::Failed to download pipeline-scan.jar"
+            exit 1
+          fi
+
+      - name: Run Pipeline Scan (all artifacts)
+        run: |
+          mkdir -p scan_results
+          SCAN_COUNT=0
+          
+          while IFS= read -r artifact; do
+            SCAN_COUNT=$((SCAN_COUNT + 1))
+            ARTIFACT_NAME=$(basename "$artifact")
+            echo ""
+            echo "=========================================="
+            echo "Scanning [$SCAN_COUNT]: $ARTIFACT_NAME"
+            echo "=========================================="
+            
+            java -jar pipeline-scan.jar \
+              -f "$artifact" \
+              -vid $VERACODE_API_ID \
+              -vkey $VERACODE_API_KEY \
+              --fail_on_severity "" \
+              --issue_details true \
+              -jo true \
+              || echo "Pipeline scan completed with findings for $ARTIFACT_NAME"
+            
+            if [ -f "results.json" ]; then
+              mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+              echo "Results saved: scan_results/${ARTIFACT_NAME}_results.json"
+            else
+              echo "::warning::No results.json produced for $ARTIFACT_NAME (artifact may not be scannable)"
+            fi
+          done < artifact_list.txt
+          
+          echo ""
+          echo "=========================================="
+          echo "Pipeline Scan completed for $SCAN_COUNT artifacts"
+          echo "=========================================="
+
+      - name: Upload Scan Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pipeline-scan-results
+          path: scan_results/
+
+  # =============================================================================
+  # PR: Pull Request -> Pipeline Scan (gate enabled, each artifact)
+  # =============================================================================
+  pr-pipeline-scan:
+    name: Pipeline Scan (PR gate)
+    needs: package
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: verascan
+
+      - name: Download Pipeline Scanner
+        run: |
+          curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -o pipeline-scan-LATEST.zip
+          if [ ! -f "pipeline-scan.jar" ]; then
+            echo "::error::Failed to download pipeline-scan.jar"
+            exit 1
+          fi
+
+      - name: Run Pipeline Scan with Gate (all artifacts)
+        run: |
+          mkdir -p scan_results
+          FAILED=0
+          SCAN_COUNT=0
+          FAILED_ARTIFACTS=""
+          
+          while IFS= read -r artifact; do
+            SCAN_COUNT=$((SCAN_COUNT + 1))
+            ARTIFACT_NAME=$(basename "$artifact")
+            echo ""
+            echo "=========================================="
+            echo "Scanning [$SCAN_COUNT]: $ARTIFACT_NAME"
+            echo "=========================================="
+            
+            if ! java -jar pipeline-scan.jar \
+              -f "$artifact" \
+              -vid $VERACODE_API_ID \
+              -vkey $VERACODE_API_KEY \
+              --issue_details true \
+              --policy_name "Veracode Recommended Very High" \
+              -jo true; then
+              FAILED=1
+              FAILED_ARTIFACTS="$FAILED_ARTIFACTS $ARTIFACT_NAME"
+              echo "::warning::Policy gate failed for: $ARTIFACT_NAME"
+            fi
+            
+            if [ -f "results.json" ]; then
+              mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+              echo "Results saved: scan_results/${ARTIFACT_NAME}_results.json"
+            else
+              echo "::warning::No results.json produced for $ARTIFACT_NAME (artifact may not be scannable)"
+            fi
+          done < artifact_list.txt
+          
+          echo ""
+          echo "=========================================="
+          echo "Pipeline Scan completed for $SCAN_COUNT artifacts"
+          if [ $FAILED -eq 1 ]; then
+            echo "::error::Policy gate failed for:$FAILED_ARTIFACTS"
+          fi
+          echo "=========================================="
+          
+          exit $FAILED
+
+      - name: Upload Scan Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pipeline-scan-gate-results
+          path: scan_results/
+
+  # =============================================================================
+  # RELEASE: release/* -> Sandbox Upload (all artifacts)
+  # =============================================================================
+  release-sandbox-scan:
+    name: Sandbox Upload (release/*)
+    needs: package
+    if: github.event_name == 'push' && startsWith(github.ref_name, 'release/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: verascan
+
+      - name: List Artifacts for Upload
+        run: |
+          echo "Artifacts to upload:"
+          ls -lh verascan/
+
+      - name: Download Veracode Java API Wrapper
+        run: |
+          mkdir -p .veracode
+          VERSION=$(curl -sS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to get API Wrapper version"
+            exit 1
+          fi
+          echo "Downloading version: $VERSION"
+          curl -sSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
+          cd .veracode && unzip -o dist.zip && cd ..
+          JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+          if [ -z "$JAR_PATH" ]; then
+            echo "::error::VeracodeJavaAPI.jar not found"
+            exit 1
+          fi
+          cp "$JAR_PATH" vosp-api-wrapper-java.jar
+
+      - name: Upload to Veracode Sandbox
+        run: |
+          echo "Uploading artifacts to Veracode Sandbox..."
+          java -jar vosp-api-wrapper-java.jar \
+            -vid $VERACODE_API_ID \
+            -vkey $VERACODE_API_KEY \
+            -action UploadAndScan \
+            -appname "${{ needs.package.outputs.app_name }}" \
+            -createprofile true \
+            -autoscan true \
+            -sandboxname "github-release" \
+            -createsandbox true \
+            -filepath "verascan" \
+            -version "Release ${{ github.run_number }}"
+
+  # =============================================================================
+  # MAIN: main -> Policy Upload (all artifacts)
+  # =============================================================================
+  main-policy-scan:
+    name: Policy Upload (main)
+    needs: package
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: verascan
+
+      - name: List Artifacts for Upload
+        run: |
+          echo "Artifacts to upload:"
+          ls -lh verascan/
+
+      - name: Download Veracode Java API Wrapper
+        run: |
+          mkdir -p .veracode
+          VERSION=$(curl -sS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to get API Wrapper version"
+            exit 1
+          fi
+          echo "Downloading version: $VERSION"
+          curl -sSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
+          cd .veracode && unzip -o dist.zip && cd ..
+          JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+          if [ -z "$JAR_PATH" ]; then
+            echo "::error::VeracodeJavaAPI.jar not found"
+            exit 1
+          fi
+          cp "$JAR_PATH" vosp-api-wrapper-java.jar
+
+      - name: Upload to Veracode Platform (Policy)
+        run: |
+          echo "Uploading artifacts to Veracode Platform..."
+          java -jar vosp-api-wrapper-java.jar \
+            -vid $VERACODE_API_ID \
+            -vkey $VERACODE_API_KEY \
+            -action UploadAndScan \
+            -appname "${{ needs.package.outputs.app_name }}" \
+            -createprofile true \
+            -autoscan true \
+            -filepath "verascan" \
+            -version "main ${{ github.run_number }}"
