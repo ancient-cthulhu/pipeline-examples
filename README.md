@@ -8,22 +8,28 @@ Repository that provides example CI/CD pipeline configurations for Veracode inte
 
 ```
 .
-├── aws/
-│   ├── english/              # Coming soon
+├── aws/                    # Coming soon
+│   ├── english/ 
 │   └── spanish/
 │       ├── aws-pipeline.yml
 │       └── veracode-strategy.md
 │
-├── azure/
+├── ado/
 │   ├── english/
 │   │   ├── azure-pipelines.yml
 │   │   └── veracode-strategy.md
-│   ├── spanish/
-│   │   ├── azure-pipelines.yml
-│   │   └── veracode-strategy.md
-│   └── README.md
+│   └── spanish/
+│       ├── azure-pipelines.yml
+│       └── veracode-strategy.md
 │
-├── github-actions/           # Coming soon
+├── github-actions/
+│   ├── english/
+│   │   ├── veracode-scans.yml
+│   │   └── veracode-strategy.md
+│   └── spanish/
+│       ├── veracode-scans.yml
+│       └── veracode-strategy.md
+│
 ├── gitlab-ci/                # Coming soon
 └── jenkins/                  # Coming soon
 ```
