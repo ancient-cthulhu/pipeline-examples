@@ -55,27 +55,6 @@ Each implementation provides:
 | `release/*` | Sandbox Scan | 30-90 min | Pre-production validation |
 | `main` | Policy Scan | 45-120 min | Production certification |
 | All | SCA | Varies | Third-party dependency analysis |
-
----
-
-## Quick Start
-
-### AWS CodeBuild
-
-1. Copy `aws/spanish/aws-pipeline.yml` to your repo as `buildspec.yml`
-2. Configure Veracode API credentials in Secrets Manager or Parameter Store
-3. Set `APP_NAME` and `SANDBOX_NAME` variables
-4. Run via CodeBuild
-
-### Azure Pipelines
-
-1. Copy `azure/english/azure-pipelines.yml` (or `azure/spanish/`) to your repo root
-2. Create a variable group `veracode-credentials` in Azure DevOps with `VERACODE_API_ID` and `VERACODE_API_KEY` as secrets
-3. Set `APP_NAME` and `SANDBOX_NAME` in the variables section
-4. Create a new pipeline in Azure DevOps pointing to `azure-pipelines.yml`
-
-Both pipelines auto-detect the branch type and run the appropriate scan. No manual scan type selection needed.
-
 ---
 
 ## Prerequisites
