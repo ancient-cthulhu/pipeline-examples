@@ -415,10 +415,10 @@ on:
 
 ## Archivos
 
-| Archivo | Idioma | Descripcion |
+| Archivo | Descripcion |
 |---------|--------|-------------|
-| `veracode-scans.yml` | Espanol | Workflow de GitHub Actions |
-| `veracode-strategy.md` | Ingles | Documentacion en ingles |
+| `veracode-scans.yml` | Workflow de GitHub Actions |
+| `veracode-strategy.md` | Documentacion |
 
 ---
 
