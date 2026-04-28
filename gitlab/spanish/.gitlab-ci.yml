@@ -135,7 +135,7 @@ package:
 # =============================================================================
 sca:
   stage: sca
-  image: openjdk:17-slim
+  image: eclipse-temurin:17-jdk
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
