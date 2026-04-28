@@ -396,7 +396,7 @@ pipelines:
 
 | File | Description |
 |------|-------------|
-| `veracode-pipeline.yml` | Bitbucket Pipelines configuration |
+| `veracode-scans.yml` | Bitbucket Pipelines configuration |
 | `veracode-strategy.md` | Documentation |
 
 ---
