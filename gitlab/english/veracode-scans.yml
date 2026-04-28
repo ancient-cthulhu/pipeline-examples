@@ -1,0 +1,310 @@
+# =============================================================================
+# Veracode Security Pipeline for Bitbucket (Multi-Artifact Support)
+# =============================================================================
+#
+# Required repository variables (Repository settings > Pipelines > Variables):
+#   - VERACODE_API_ID         (required)
+#   - VERACODE_API_KEY        (required, mark as secured)
+#   - SRCCLR_API_TOKEN        (optional, only if SCA is used)
+#   - VERACODE_APP_NAME       (optional, overrides the default app name)
+#
+# Scan strategy auto-detected by branch / event:
+#   feature/*       -> Pipeline Scan (no gate)                      per artifact
+#   pull-requests   -> Pipeline Scan (gate Very High / High)         per artifact
+#   release/*       -> Sandbox Scan (full SAST in sandbox)           all artifacts
+#   main            -> Policy Scan (production certification)        all artifacts
+#
+# Default app name format: {workspace}/{repo} via $BITBUCKET_REPO_FULL_NAME
+# =============================================================================
+
+image: maven:3.9.6-eclipse-temurin-17
+
+definitions:
+  steps:
+    # -------------------------------------------------------------------------
+    # PACKAGE
+    # Build, autopackage, list and validate artifacts
+    # -------------------------------------------------------------------------
+    - step: &package
+        name: Package Artifacts
+        script:
+          - set -e
+          # Resolve Veracode application profile name
+          - |
+            if [ -n "$VERACODE_APP_NAME" ]; then
+              APP_NAME="$VERACODE_APP_NAME"
+            else
+              APP_NAME="$BITBUCKET_REPO_FULL_NAME"
+            fi
+            echo "Veracode Application Profile: $APP_NAME"
+            echo "$APP_NAME" > app_name.txt
+          # Install Veracode CLI
+          - echo "Installing Veracode CLI..."
+          - curl -fsS -O https://tools.veracode.com/veracode-cli/install
+          - chmod +x ./install
+          - ./install
+          - chmod +x veracode
+          - ./veracode version
+          # Run autopackager
+          - echo "Running Veracode autopackager..."
+          - mkdir -p verascan
+          - ./veracode package --source . --output verascan --trust
+          - echo "Packaged artifacts:"
+          - ls -lhR verascan
+          # List and validate artifacts
+          - find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
+          - |
+            if [ ! -s artifact_list.txt ]; then
+              echo "ERROR: No packaged artifacts found"
+              ls -lR verascan
+              exit 1
+            fi
+          - echo "Artifacts found:"
+          - cat artifact_list.txt
+          - ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
+          - echo "Total artifacts - $ARTIFACT_COUNT"
+        artifacts:
+          - veracode
+          - verascan/**
+          - artifact_list.txt
+          - app_name.txt
+
+    # -------------------------------------------------------------------------
+    # SCA
+    # Agent-Based Software Composition Analysis (runs on every branch)
+    # -------------------------------------------------------------------------
+    - step: &sca-scan
+        name: Agent-Based SCA
+        script:
+          - set -e
+          - echo "Running Veracode Agent-Based SCA..."
+          - curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
+
+    # -------------------------------------------------------------------------
+    # FEATURE PIPELINE SCAN
+    # feature/*  -> Pipeline Scan, no gate, per artifact
+    # -------------------------------------------------------------------------
+    - step: &pipeline-scan
+        name: Pipeline Scan (feature)
+        script:
+          - set -e
+          - echo "Installing prerequisites..."
+          - apt-get update && apt-get install -y unzip default-jre
+          - echo "Downloading Veracode Pipeline Scanner..."
+          - curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          - unzip -o pipeline-scan-LATEST.zip
+          - |
+            if [ ! -f "pipeline-scan.jar" ]; then
+              echo "ERROR: pipeline-scan.jar not found"
+              exit 1
+            fi
+          - mkdir -p scan_results
+          - SCAN_COUNT=0
+          # Iterate and scan each artifact individually
+          - |
+            while IFS= read -r artifact; do
+              SCAN_COUNT=$((SCAN_COUNT + 1))
+              ARTIFACT_NAME=$(basename "$artifact")
+              echo ""
+              echo "=========================================="
+              echo "Scanning [$SCAN_COUNT] - $ARTIFACT_NAME"
+              echo "=========================================="
+              java -jar pipeline-scan.jar \
+                -f "$artifact" \
+                -vid "$VERACODE_API_ID" \
+                -vkey "$VERACODE_API_KEY" \
+                --fail_on_severity "" \
+                --issue_details true \
+                -jo true \
+                || echo "Pipeline scan completed with findings for $ARTIFACT_NAME"
+              if [ -f "results.json" ]; then
+                mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+                echo "Results saved - scan_results/${ARTIFACT_NAME}_results.json"
+              else
+                echo "WARNING - No results.json produced for $ARTIFACT_NAME"
+              fi
+            done < artifact_list.txt
+          - echo "Pipeline Scan completed for $SCAN_COUNT artifacts"
+        artifacts:
+          - scan_results/**
+
+    # -------------------------------------------------------------------------
+    # PR PIPELINE SCAN (GATE)
+    # pull-requests -> Pipeline Scan with policy gate (Very High / High)
+    # -------------------------------------------------------------------------
+    - step: &pipeline-scan-gate
+        name: Pipeline Scan (PR Gate)
+        script:
+          - set -e
+          - echo "Installing prerequisites..."
+          - apt-get update && apt-get install -y unzip default-jre
+          - echo "Downloading Veracode Pipeline Scanner..."
+          - curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          - unzip -o pipeline-scan-LATEST.zip
+          - |
+            if [ ! -f "pipeline-scan.jar" ]; then
+              echo "ERROR: pipeline-scan.jar not found"
+              exit 1
+            fi
+          - mkdir -p scan_results
+          - FAILED=0
+          - SCAN_COUNT=0
+          - FAILED_ARTIFACTS=""
+          # Iterate, scan each artifact, track failures across artifacts
+          - |
+            while IFS= read -r artifact; do
+              SCAN_COUNT=$((SCAN_COUNT + 1))
+              ARTIFACT_NAME=$(basename "$artifact")
+              echo ""
+              echo "=========================================="
+              echo "Scanning [$SCAN_COUNT] - $ARTIFACT_NAME"
+              echo "=========================================="
+              if ! java -jar pipeline-scan.jar \
+                -f "$artifact" \
+                -vid "$VERACODE_API_ID" \
+                -vkey "$VERACODE_API_KEY" \
+                --fail_on_severity "Very High, High" \
+                --issue_details true \
+                --policy_name "Veracode Recommended Very High" \
+                -jo true; then
+                FAILED=1
+                FAILED_ARTIFACTS="$FAILED_ARTIFACTS $ARTIFACT_NAME"
+                echo "WARNING - Policy gate failed for $ARTIFACT_NAME"
+              fi
+              if [ -f "results.json" ]; then
+                mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+                echo "Results saved - scan_results/${ARTIFACT_NAME}_results.json"
+              else
+                echo "WARNING - No results.json produced for $ARTIFACT_NAME"
+              fi
+            done < artifact_list.txt
+          - echo "Pipeline Scan completed for $SCAN_COUNT artifacts"
+          - |
+            if [ $FAILED -eq 1 ]; then
+              echo "ERROR - Policy gate failed for -$FAILED_ARTIFACTS"
+              exit 1
+            fi
+        artifacts:
+          - scan_results/**
+
+    # -------------------------------------------------------------------------
+    # SANDBOX SCAN
+    # release/* -> Upload all artifacts to a Veracode Sandbox
+    # -------------------------------------------------------------------------
+    - step: &sandbox-scan
+        name: Sandbox Scan (Release)
+        script:
+          - set -e
+          - echo "Installing prerequisites..."
+          - apt-get update && apt-get install -y unzip
+          - echo "Downloading Veracode Java API Wrapper..."
+          - mkdir -p .veracode
+          - VERSION=$(curl -fsS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+          - |
+            if [ -z "$VERSION" ]; then
+              echo "ERROR: Failed to get API Wrapper version"
+              exit 1
+            fi
+          - echo "Downloading version $VERSION"
+          - curl -fsSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
+          - cd .veracode && unzip -o dist.zip && cd ..
+          - JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+          - |
+            if [ -z "$JAR_PATH" ]; then
+              echo "ERROR: VeracodeJavaAPI.jar not found"
+              exit 1
+            fi
+          - cp "$JAR_PATH" vosp-api-wrapper-java.jar
+          - APP_NAME=$(cat app_name.txt)
+          - echo "Uploading to Veracode Sandbox..."
+          - echo "Application - $APP_NAME"
+          - echo "Artifacts to upload:"
+          - ls -lh verascan/
+          # -filepath accepts a directory; the wrapper handles multi-file upload
+          - |
+            java -jar vosp-api-wrapper-java.jar \
+              -vid "$VERACODE_API_ID" \
+              -vkey "$VERACODE_API_KEY" \
+              -action UploadAndScan \
+              -appname "$APP_NAME" \
+              -createprofile true \
+              -autoscan true \
+              -sandboxname "bitbucket-release" \
+              -createsandbox true \
+              -filepath "verascan" \
+              -version "Release $BITBUCKET_BUILD_NUMBER"
+
+    # -------------------------------------------------------------------------
+    # POLICY SCAN
+    # main -> Upload all artifacts for policy evaluation
+    # -------------------------------------------------------------------------
+    - step: &policy-scan
+        name: Policy Scan (Production)
+        script:
+          - set -e
+          - echo "Installing prerequisites..."
+          - apt-get update && apt-get install -y unzip
+          - echo "Downloading Veracode Java API Wrapper..."
+          - mkdir -p .veracode
+          - VERSION=$(curl -fsS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+          - |
+            if [ -z "$VERSION" ]; then
+              echo "ERROR: Failed to get API Wrapper version"
+              exit 1
+            fi
+          - echo "Downloading version $VERSION"
+          - curl -fsSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
+          - cd .veracode && unzip -o dist.zip && cd ..
+          - JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+          - |
+            if [ -z "$JAR_PATH" ]; then
+              echo "ERROR: VeracodeJavaAPI.jar not found"
+              exit 1
+            fi
+          - cp "$JAR_PATH" vosp-api-wrapper-java.jar
+          - APP_NAME=$(cat app_name.txt)
+          - echo "Uploading to Veracode Platform..."
+          - echo "Application - $APP_NAME"
+          - echo "Artifacts to upload:"
+          - ls -lh verascan/
+          - |
+            java -jar vosp-api-wrapper-java.jar \
+              -vid "$VERACODE_API_ID" \
+              -vkey "$VERACODE_API_KEY" \
+              -action UploadAndScan \
+              -appname "$APP_NAME" \
+              -createprofile true \
+              -autoscan true \
+              -filepath "verascan" \
+              -version "main $BITBUCKET_BUILD_NUMBER"
+
+# =============================================================================
+# PIPELINE TRIGGERS
+# Branch and event mappings
+# =============================================================================
+pipelines:
+  branches:
+    main:
+      - step: *package
+      - parallel:
+          - step: *sca-scan
+          - step: *policy-scan
+
+    release/*:
+      - step: *package
+      - parallel:
+          - step: *sca-scan
+          - step: *sandbox-scan
+
+    feature/*:
+      - step: *package
+      - parallel:
+          - step: *sca-scan
+          - step: *pipeline-scan
+
+  pull-requests:
+    '**':
+      - step: *package
+      - parallel:
+          - step: *sca-scan
+          - step: *pipeline-scan-gate
