@@ -4,8 +4,6 @@ Estrategia de seguridad automatizada que integra multiples productos de Veracode
 
 **Tecnologias soportadas**: Java (Maven/Gradle/Ant), .NET (Core/Framework), Node.js, Python, Go, PHP, Ruby, Scala, y mas.
 
-> Version en ingles: [README.md](./README.md)
-
 ---
 
 ## Estrategia de Escaneo
