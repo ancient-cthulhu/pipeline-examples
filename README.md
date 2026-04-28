@@ -70,7 +70,7 @@ Each implementation provides:
 | Bitbucket Pipelines | Available | Yes | Yes |
 | GitHub Actions | Available | Yes | Yes |
 | GitLab CI/CD | Available | Yes | Yes |
-| AWS CodeBuild | Coming soon | - | - |
+| AWS CodeBuild | 1/2 Available | - | Yes |
 | Jenkins | Coming soon | - | - |
 
 ---
