@@ -1,0 +1,323 @@
+# =============================================================================
+# CI - Veracode (GitLab CI/CD)
+#
+# Veracode Security Scanning for GitLab (Multi-Artifact Support)
+#
+# Required CI/CD variables (Settings > CI/CD > Variables, masked + protected):
+#   - VERACODE_API_ID    : Veracode API ID
+#   - VERACODE_API_KEY   : Veracode API Key
+#   - SRCCLR_API_TOKEN   : SCA Agent token (optional)
+#   - VERACODE_APP_NAME  : Override default app profile name (optional)
+#
+# Scan type is auto-detected by branch / pipeline source:
+#   feature/*  -> Pipeline Scan (no gate) - each artifact individually
+#   MR         -> Pipeline Scan (gate on Very High/High) - each artifact
+#   release/*  -> Sandbox Scan - all artifacts uploaded to folder
+#   main       -> Policy Scan - all artifacts uploaded to folder
+#
+# APP_NAME format: {namespace}/{project} (customizable via VERACODE_APP_NAME)
+# =============================================================================
+
+stages:
+  - package
+  - sca
+  - scan
+
+# Avoid double pipelines (branch + MR) on the same push.
+# When an MR is open for a feature branch, only the MR pipeline runs.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH =~ /^release\/.*/
+    - if: $CI_COMMIT_BRANCH =~ /^feature\/.*/
+
+variables:
+  # Pin the Java image used by Pipeline Scan and the API Wrapper
+  JAVA_IMAGE: "eclipse-temurin:17-jdk"
+  # Where the autopackager writes artifacts
+  VERASCAN_DIR: "verascan"
+
+# -----------------------------------------------------------------------------
+# Reusable script blocks (YAML anchors)
+# -----------------------------------------------------------------------------
+.set_app_name: &set_app_name |
+  if [ -n "$VERACODE_APP_NAME" ]; then
+    APP_NAME="$VERACODE_APP_NAME"
+  else
+    APP_NAME="${CI_PROJECT_PATH}"
+  fi
+  echo "Veracode Application Profile: $APP_NAME"
+  echo "APP_NAME=$APP_NAME" > app_name.env
+
+.download_pipeline_scanner: &download_pipeline_scanner |
+  apt-get update -qq && apt-get install -y -qq curl unzip ca-certificates >/dev/null
+  curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+  unzip -o pipeline-scan-LATEST.zip
+  if [ ! -f "pipeline-scan.jar" ]; then
+    echo "ERROR: Failed to download pipeline-scan.jar" >&2
+    exit 1
+  fi
+
+.download_api_wrapper: &download_api_wrapper |
+  apt-get update -qq && apt-get install -y -qq curl unzip ca-certificates grep >/dev/null
+  mkdir -p .veracode
+  VERSION=$(curl -fsS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+  if [ -z "$VERSION" ]; then
+    echo "ERROR: Failed to get API Wrapper version" >&2
+    exit 1
+  fi
+  echo "Downloading Veracode Java API Wrapper version: $VERSION"
+  curl -fsSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
+  cd .veracode && unzip -o dist.zip && cd ..
+  JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+  if [ -z "$JAR_PATH" ]; then
+    echo "ERROR: VeracodeJavaAPI.jar not found" >&2
+    exit 1
+  fi
+  cp "$JAR_PATH" vosp-api-wrapper-java.jar
+
+# =============================================================================
+# PACKAGE: Build and package artifacts with Veracode CLI
+# =============================================================================
+package:
+  stage: package
+  image: ubuntu:22.04
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH =~ /^release\/.*/
+    - if: $CI_COMMIT_BRANCH =~ /^feature\/.*/
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl unzip ca-certificates findutils >/dev/null
+  script:
+    - *set_app_name
+    - |
+      echo "Installing Veracode CLI..."
+      curl -fsS -O https://tools.veracode.com/veracode-cli/install
+      chmod +x ./install
+      ./install
+      ./veracode version
+    - |
+      echo "Running Veracode Autopackager..."
+      mkdir -p "$VERASCAN_DIR"
+      ./veracode package --source . --output "$VERASCAN_DIR" --trust
+      echo "Packaged artifacts:"
+      ls -lhR "$VERASCAN_DIR"
+    - |
+      echo "Listing and validating artifacts..."
+      find "$VERASCAN_DIR" -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
+      if [ ! -s artifact_list.txt ]; then
+        echo "ERROR: No packaged artifacts found" >&2
+        ls -lR "$VERASCAN_DIR"
+        exit 1
+      fi
+      echo "Artifacts found:"
+      cat artifact_list.txt
+      ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
+      echo "Total artifacts: $ARTIFACT_COUNT"
+      echo "ARTIFACT_COUNT=$ARTIFACT_COUNT" >> app_name.env
+  artifacts:
+    name: "verascan-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - verascan/
+      - artifact_list.txt
+    reports:
+      dotenv: app_name.env
+    expire_in: 1 week
+    when: on_success
+
+# =============================================================================
+# SCA: Agent-Based SCA (runs on all branches/MRs)
+# =============================================================================
+sca:
+  stage: sca
+  image: eclipse-temurin:17-jdk
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH =~ /^release\/.*/
+    - if: $CI_COMMIT_BRANCH =~ /^feature\/.*/
+  needs: []
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl ca-certificates git >/dev/null
+  script:
+    - |
+      if [ -z "$SRCCLR_API_TOKEN" ]; then
+        echo "WARNING: SRCCLR_API_TOKEN not set; skipping SCA scan."
+        exit 0
+      fi
+      curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
+  allow_failure: true
+
+# =============================================================================
+# FEATURE: feature/* -> Pipeline Scan (no gate, each artifact)
+# =============================================================================
+feature-pipeline-scan:
+  stage: scan
+  image: $JAVA_IMAGE
+  needs:
+    - job: package
+      artifacts: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^feature\/.*/
+  script:
+    - *download_pipeline_scanner
+    - |
+      mkdir -p scan_results
+      SCAN_COUNT=0
+      while IFS= read -r artifact; do
+        SCAN_COUNT=$((SCAN_COUNT + 1))
+        ARTIFACT_NAME=$(basename "$artifact")
+        echo ""
+        echo "=========================================="
+        echo "Scanning [$SCAN_COUNT]: $ARTIFACT_NAME"
+        echo "=========================================="
+        java -jar pipeline-scan.jar \
+          -f "$artifact" \
+          -vid "$VERACODE_API_ID" \
+          -vkey "$VERACODE_API_KEY" \
+          --fail_on_severity "" \
+          --issue_details true \
+          -jo true \
+          || echo "Pipeline scan completed with findings for $ARTIFACT_NAME"
+        if [ -f "results.json" ]; then
+          mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+          echo "Results saved: scan_results/${ARTIFACT_NAME}_results.json"
+        else
+          echo "WARNING: No results.json produced for $ARTIFACT_NAME (artifact may not be scannable)"
+        fi
+      done < artifact_list.txt
+      echo ""
+      echo "=========================================="
+      echo "Pipeline Scan completed for $SCAN_COUNT artifacts"
+      echo "=========================================="
+  artifacts:
+    name: "pipeline-scan-results-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - scan_results/
+    when: always
+    expire_in: 1 month
+
+# =============================================================================
+# MR: Merge Request -> Pipeline Scan (gate enabled, each artifact)
+# Forks are excluded: MR pipelines from forks run in the source project
+# unless explicitly run from the parent project; this rule keeps the gate
+# limited to the parent project.
+# =============================================================================
+mr-pipeline-scan:
+  stage: scan
+  image: $JAVA_IMAGE
+  needs:
+    - job: package
+      artifacts: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_MERGE_REQUEST_PROJECT_ID
+  script:
+    - *download_pipeline_scanner
+    - |
+      mkdir -p scan_results
+      FAILED=0
+      SCAN_COUNT=0
+      FAILED_ARTIFACTS=""
+      while IFS= read -r artifact; do
+        SCAN_COUNT=$((SCAN_COUNT + 1))
+        ARTIFACT_NAME=$(basename "$artifact")
+        echo ""
+        echo "=========================================="
+        echo "Scanning [$SCAN_COUNT]: $ARTIFACT_NAME"
+        echo "=========================================="
+        if ! java -jar pipeline-scan.jar \
+          -f "$artifact" \
+          -vid "$VERACODE_API_ID" \
+          -vkey "$VERACODE_API_KEY" \
+          --issue_details true \
+          --policy_name "Veracode Recommended Very High" \
+          -jo true; then
+          FAILED=1
+          FAILED_ARTIFACTS="$FAILED_ARTIFACTS $ARTIFACT_NAME"
+          echo "WARNING: Policy gate failed for: $ARTIFACT_NAME"
+        fi
+        if [ -f "results.json" ]; then
+          mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
+          echo "Results saved: scan_results/${ARTIFACT_NAME}_results.json"
+        else
+          echo "WARNING: No results.json produced for $ARTIFACT_NAME (artifact may not be scannable)"
+        fi
+      done < artifact_list.txt
+      echo ""
+      echo "=========================================="
+      echo "Pipeline Scan completed for $SCAN_COUNT artifacts"
+      if [ $FAILED -eq 1 ]; then
+        echo "ERROR: Policy gate failed for:$FAILED_ARTIFACTS" >&2
+      fi
+      echo "=========================================="
+      exit $FAILED
+  artifacts:
+    name: "pipeline-scan-gate-results-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - scan_results/
+    when: always
+    expire_in: 1 month
+
+# =============================================================================
+# RELEASE: release/* -> Sandbox Upload (all artifacts)
+# =============================================================================
+release-sandbox-scan:
+  stage: scan
+  image: $JAVA_IMAGE
+  needs:
+    - job: package
+      artifacts: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^release\/.*/
+  script:
+    - |
+      echo "Artifacts to upload:"
+      ls -lh "$VERASCAN_DIR"/
+    - *download_api_wrapper
+    - |
+      echo "Uploading artifacts to Veracode Sandbox..."
+      java -jar vosp-api-wrapper-java.jar \
+        -vid "$VERACODE_API_ID" \
+        -vkey "$VERACODE_API_KEY" \
+        -action UploadAndScan \
+        -appname "$APP_NAME" \
+        -createprofile true \
+        -autoscan true \
+        -sandboxname "gitlab-release" \
+        -createsandbox true \
+        -filepath "$VERASCAN_DIR" \
+        -version "Release ${CI_PIPELINE_IID}"
+
+# =============================================================================
+# MAIN: main -> Policy Upload (all artifacts)
+# =============================================================================
+main-policy-scan:
+  stage: scan
+  image: $JAVA_IMAGE
+  needs:
+    - job: package
+      artifacts: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
+  script:
+    - |
+      echo "Artifacts to upload:"
+      ls -lh "$VERASCAN_DIR"/
+    - *download_api_wrapper
+    - |
+      echo "Uploading artifacts to Veracode Platform..."
+      java -jar vosp-api-wrapper-java.jar \
+        -vid "$VERACODE_API_ID" \
+        -vkey "$VERACODE_API_KEY" \
+        -action UploadAndScan \
+        -appname "$APP_NAME" \
+        -createprofile true \
+        -autoscan true \
+        -filepath "$VERASCAN_DIR" \
+        -version "main ${CI_PIPELINE_IID}"
