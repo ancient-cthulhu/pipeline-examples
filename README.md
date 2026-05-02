@@ -111,9 +111,3 @@ Each folder contains:
 - [SCA Agent-Based](https://docs.veracode.com/r/Agent_Based_Scans)
 - [Veracode Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers)
 
-**Platform-Specific Veracode Docs**:
-
-- [Azure DevOps Pipeline Scan Examples](https://docs.veracode.com/r/Azure_DevOps_Pipeline_Scan_Examples)
-- [Bitbucket Pipeline Scan Examples](https://docs.veracode.com/r/Bitbucket_Pipeline_Scan_Examples)
-- [GitHub Actions Pipeline Scan Examples](https://docs.veracode.com/r/Github_Pipeline_Scan_Examples)
-- [GitLab Pipeline Scan Examples](https://docs.veracode.com/r/Gitlab_Pipeline_Scan_Examples)
