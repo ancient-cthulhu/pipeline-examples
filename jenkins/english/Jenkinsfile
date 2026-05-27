@@ -1,6 +1,8 @@
 // =============================================================================
 // Veracode Security Pipeline for Jenkins (Multi-Artifact Support)
 // =============================================================================
+// Tested against: https://github.com/veracode/verademo (Maven, Spring Boot WAR)
+//                 pom is at app/pom.xml, WAR builds to app/target/verademo.war
 //
 // Required Jenkins credentials (Manage Jenkins > Credentials):
 //   - veracode-api-id        Secret text -> Veracode API ID
@@ -9,6 +11,10 @@
 //
 // Optional environment variables (set at folder, job, or pipeline level):
 //   - VERACODE_APP_NAME      Override default app profile name
+//   - MAVEN_POM_PATH         Path to the Maven pom (default: app/pom.xml for
+//                            verademo; set to "pom.xml" for repo-root projects)
+//   - VERACODE_SOURCE_DIR    Directory the autopackager scans
+//                            (default: app for verademo, "." for repo-root)
 //
 // Scan strategy auto-detected by branch / event (multibranch pipeline):
 //   feature/*       -> Pipeline Scan (no gate)                  per artifact
@@ -21,7 +27,7 @@
 //
 // This pipeline uses the Veracode CLI, the Pipeline Scanner JAR, and the
 // Java API Wrapper directly. It does not require the Veracode Jenkins plugin,
-// so it runs on any agent with java, curl, and unzip available.
+// so it runs on any agent with java, maven, curl, and unzip available.
 // =============================================================================
 
 pipeline {
@@ -35,14 +41,62 @@ pipeline {
         timeout(time: 2, unit: 'HOURS')
         buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
         disableConcurrentBuilds()
+        // skipDefaultCheckout is NOT set: declarative pipelines auto-checkout
+        // the multibranch SCM into the workspace at the start of the build.
     }
 
     environment {
         VERACODE_API_ID  = credentials('veracode-api-id')
         VERACODE_API_KEY = credentials('veracode-api-key')
+        // verademo defaults. To target a different repo, set these at the
+        // job / folder level under "Environment variables":
+        //   MAVEN_POM_PATH       e.g. "pom.xml" for repo-root projects
+        //   VERACODE_SOURCE_DIR  e.g. "." for repo-root projects
     }
 
     stages {
+
+        // ---------------------------------------------------------------------
+        // CHECKOUT
+        // For Multibranch Pipeline jobs, `checkout scm` clones the branch /
+        // change request that triggered the build. For standalone Pipeline
+        // jobs, replace with an explicit checkout step (see strategy doc).
+        // ---------------------------------------------------------------------
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh '''
+                    echo "Repository contents:"
+                    ls -la
+                    echo ""
+                    echo "Branch:       ${BRANCH_NAME:-(no BRANCH_NAME, classic pipeline)}"
+                    echo "Change ID:    ${CHANGE_ID:-(not a change request)}"
+                    echo "Build number: ${BUILD_NUMBER}"
+                '''
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // BUILD
+        // Maven build before the autopackager. The autopackager works without
+        // this for many projects, but for Spring Boot WAR projects like
+        // verademo a clean Maven package produces the canonical artifact.
+        // ---------------------------------------------------------------------
+        stage('Build (Maven)') {
+            steps {
+                sh '''
+                    set -e
+                    MAVEN_POM_PATH="${MAVEN_POM_PATH:-app/pom.xml}"
+
+                    echo "Building Maven project: $MAVEN_POM_PATH"
+                    mvn -B -f "$MAVEN_POM_PATH" clean package -DskipTests
+
+                    echo ""
+                    echo "Build output:"
+                    find . -type f \\( -name "*.war" -o -name "*.jar" \\) -not -path "*/\\.*" | head -20
+                '''
+            }
+        }
 
         // ---------------------------------------------------------------------
         // PACKAGE
@@ -60,6 +114,7 @@ pipeline {
                 sh '''
                     set -e
                     echo "$VERACODE_APP_NAME_RESOLVED" > app_name.txt
+                    VERACODE_SOURCE_DIR="${VERACODE_SOURCE_DIR:-app}"
 
                     echo "Installing Veracode CLI..."
                     curl -fsS -O https://tools.veracode.com/veracode-cli/install
@@ -68,9 +123,9 @@ pipeline {
                     chmod +x veracode
                     ./veracode version
 
-                    echo "Running Veracode autopackager..."
+                    echo "Running Veracode autopackager on: $VERACODE_SOURCE_DIR"
                     mkdir -p verascan
-                    ./veracode package --source . --output verascan --trust
+                    ./veracode package --source "$VERACODE_SOURCE_DIR" --output verascan --trust
 
                     echo "Packaged artifacts:"
                     ls -lhR verascan
