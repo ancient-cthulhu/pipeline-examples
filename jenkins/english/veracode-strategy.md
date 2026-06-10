@@ -96,7 +96,6 @@ The pipeline assumes the following plugins are installed on the Jenkins controll
 | Credentials Binding | `withCredentials` and `credentials()` |
 | Workspace Cleanup | `cleanWs` step in `post { always }` |
 | Timestamper | `timestamps()` option |
-| AnsiColor | `ansiColor('xterm')` option |
 
 All agents must have `java` (JRE 8+), `curl`, and `unzip` available on `PATH`.
 
