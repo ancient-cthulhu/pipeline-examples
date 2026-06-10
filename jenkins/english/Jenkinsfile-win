@@ -1,3 +1,36 @@
+// =============================================================================
+// Veracode Security Pipeline for Jenkins (Multi-Artifact Support)
+// =============================================================================
+// Tested against: https://github.com/veracode/verademo (Maven, Spring Boot WAR)
+//                 pom is at app/pom.xml, WAR builds to app/target/verademo.war
+//
+// Required Jenkins credentials (Manage Jenkins > Credentials):
+//   - veracode-api-id        Secret text -> Veracode API ID
+//   - veracode-api-key       Secret text -> Veracode API Key
+//   - srcclr-api-token       Secret text -> SCA Agent token (optional)
+//
+// Optional environment variables (set at folder, job, or pipeline level):
+//   - VERACODE_APP_NAME      Override default app profile name
+//   - MAVEN_POM_PATH         Path to the Maven pom (default: app/pom.xml for
+//                            verademo; set to "pom.xml" for repo-root projects)
+//   - VERACODE_SOURCE_DIR    Directory the autopackager scans
+//                            (default: app for verademo, "." for repo-root)
+//
+// Scan strategy auto-detected by branch / event (multibranch pipeline):
+//   feature/*       -> Pipeline Scan (no gate)                  per artifact
+//   change request  -> Pipeline Scan (gate Very High / High)    per artifact
+//   release/*       -> Sandbox Scan (full SAST in sandbox)      all artifacts
+//   main            -> Policy Scan (production certification)   all artifacts
+//
+// Default app name format: {JOB_NAME} (multibranch: parent folder/job)
+// Override via VERACODE_APP_NAME environment variable or pipeline parameter.
+//
+// This pipeline uses the Veracode CLI, the Pipeline Scanner JAR, and the
+// Java API Wrapper directly. It does not require the Veracode Jenkins plugin,
+// so it runs on any agent with java, maven, curl, and unzip available.
+// =============================================================================
+
+
 pipeline {
     agent any
 
