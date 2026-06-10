@@ -50,13 +50,15 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                git branch: 'main', url: 'https://github.com/veracode/verademo.git'
+                checkout scm
         
                 powershell '''
                     Write-Host "Repository contents:"
                     Get-ChildItem -Force
         
                     Write-Host ""
+                    Write-Host "Branch:       $env:BRANCH_NAME"
+                    Write-Host "Change ID:    $env:CHANGE_ID"
                     Write-Host "Build number: $env:BUILD_NUMBER"
                     Write-Host "Workspace:    $env:WORKSPACE"
                 '''
