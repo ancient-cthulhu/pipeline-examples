@@ -1,0 +1,265 @@
+// =============================================================================
+// Veracode Security Pipeline for Jenkins (Simplified)
+// =============================================================================
+// Two scan types only:
+//   Agent-Based SCA   -> every build (token-gated, skips gracefully if absent)
+//   Policy Scan       -> top-level branches only (main / master / develop)
+//
+// Tested against: https://github.com/veracode/verademo (Maven, Spring Boot WAR)
+//                 pom at app/pom.xml, WAR builds to app/target/verademo.war
+//
+// Required Jenkins credentials (Manage Jenkins > Credentials):
+//   - veracode-api-id    Secret text -> Veracode API ID   (required)
+//   - veracode-api-key   Secret text -> Veracode API Key  (required)
+//   - srcclr-api-token   Secret text -> SCA Agent token   (optional)
+//
+// Optional environment variables (folder, job, or pipeline level):
+//   - VERACODE_APP_NAME    Override app profile name (default: org/repo, i.e.
+//                          JOB_NAME with the branch segment removed)
+//   - MAVEN_POM_PATH       Path to the Maven pom (default: app/pom.xml)
+//   - VERACODE_SOURCE_DIR  Directory the autopackager scans (default: app)
+//   - TOP_LEVEL_BRANCHES   Regex of branches that get a Policy Scan
+//                          (default: main|master|develop)
+//
+// Windows-native: runs on any agent with java, maven, powershell, and curl.
+// Uses the Veracode CLI, the Java API Wrapper, and the SCA agent directly,
+// so it does not require the Veracode Jenkins plugin.
+// =============================================================================
+
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        timeout(time: 2, unit: 'HOURS')
+        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        VERACODE_API_ID  = credentials('veracode-api-id')
+        VERACODE_API_KEY = credentials('veracode-api-key')
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+
+                script {
+                    def pattern   = (env.TOP_LEVEL_BRANCHES?.trim()) ?: 'main|master|develop'
+                    def isBranch  = env.BRANCH_NAME ==~ /(${pattern})/
+                    def isCR      = (env.CHANGE_ID != null)
+                    env.IS_TOP_LEVEL = (isBranch && !isCR) ? 'true' : 'false'
+                    echo "Branch: ${env.BRANCH_NAME} | Change request: ${isCR} | Policy Scan eligible: ${env.IS_TOP_LEVEL}"
+                }
+
+                powershell '''
+                    Write-Host "Repository contents:"
+                    Get-ChildItem -Force
+                    Write-Host ""
+                    Write-Host "Branch:       $env:BRANCH_NAME"
+                    Write-Host "Change ID:    $env:CHANGE_ID"
+                    Write-Host "Build number: $env:BUILD_NUMBER"
+                    Write-Host "Workspace:    $env:WORKSPACE"
+                '''
+            }
+        }
+
+        // Build + Package only run when a Policy Scan will follow (top-level branch).
+        stage('Build (Maven)') {
+            when { expression { env.IS_TOP_LEVEL == 'true' } }
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $mavenPom = if ($env:MAVEN_POM_PATH) { $env:MAVEN_POM_PATH } else { "app/pom.xml" }
+
+                    Write-Host "Building Maven project: $mavenPom"
+                    mvn -B -f "$mavenPom" clean package -DskipTests
+
+                    Write-Host ""
+                    Write-Host "Build output:"
+                    Get-ChildItem -Recurse -File -Include *.war, *.jar |
+                        Where-Object { $_.FullName -notmatch "\\\\.git\\\\" } |
+                        Select-Object -First 20 |
+                        ForEach-Object { Write-Host $_.FullName }
+                '''
+            }
+        }
+
+        stage('Package Artifacts') {
+            when { expression { env.IS_TOP_LEVEL == 'true' } }
+            steps {
+                script {
+                    // Always org/repo, independent of branch. In a multibranch job
+                    // JOB_NAME is org/repo/branch (the branch is the last, URL-encoded
+                    // segment), so drop the final path segment.
+                    def jobPath = env.JOB_NAME
+                    def orgRepo = jobPath?.contains('/') ? jobPath.substring(0, jobPath.lastIndexOf('/')) : jobPath
+                    def appName = env.VERACODE_APP_NAME?.trim() ?: orgRepo
+                    env.VERACODE_APP_NAME_RESOLVED = appName
+                    echo "Veracode Application Profile: ${appName}"
+                }
+
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    $env:VERACODE_API_KEY_ID = $env:VERACODE_API_ID
+                    $env:VERACODE_API_KEY_SECRET = $env:VERACODE_API_KEY
+
+                    $env:VERACODE_APP_NAME_RESOLVED | Out-File -FilePath app_name.txt -Encoding utf8
+
+                    $sourceDir = if ($env:VERACODE_SOURCE_DIR) { $env:VERACODE_SOURCE_DIR } else { "app" }
+
+                    Write-Host "Installing Veracode CLI..."
+                    Invoke-WebRequest -Uri "https://tools.veracode.com/veracode-cli/install.ps1" -OutFile "install.ps1"
+                    powershell -NoProfile -ExecutionPolicy Bypass -File ".\\install.ps1"
+
+                    $env:Path += ";$env:USERPROFILE\\.veracode-cli"
+
+                    $veracodeExe = Join-Path $env:USERPROFILE ".veracode-cli\\veracode.exe"
+                    if (!(Test-Path $veracodeExe)) {
+                        $veracodeExe = "veracode"
+                    }
+
+                    & $veracodeExe version
+
+                    Write-Host "Running Veracode autopackager on: $sourceDir"
+                    New-Item -ItemType Directory -Force -Path verascan | Out-Null
+
+                    & $veracodeExe package --source "$sourceDir" --output verascan --trust
+
+                    Write-Host "Packaged artifacts:"
+                    Get-ChildItem -Recurse verascan | Format-Table FullName, Length -AutoSize
+
+                    $artifacts = Get-ChildItem -Path verascan -Recurse -File -Include *.war, *.jar, *.zip
+
+                    if (!$artifacts -or $artifacts.Count -eq 0) {
+                        Write-Error "No packaged artifacts found"
+                    }
+
+                    $artifacts.FullName | Out-File -FilePath artifact_list.txt -Encoding utf8
+
+                    Write-Host "Artifacts found:"
+                    Get-Content artifact_list.txt
+                    Write-Host "Total artifacts: $($artifacts.Count)"
+                '''
+            }
+
+            post {
+                success {
+                    stash name: 'verascan-bundle',
+                          includes: 'verascan/**,artifact_list.txt,app_name.txt'
+                    archiveArtifacts artifacts: 'artifact_list.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Veracode Security Scans') {
+            parallel {
+
+                // -------------------------------------------------------------
+                // Agent-Based SCA: runs on every build. Skips cleanly if the
+                // srcclr-api-token credential is not configured.
+                // -------------------------------------------------------------
+                stage('Agent-Based SCA') {
+                    steps {
+                        script {
+                            try {
+                                withCredentials([string(credentialsId: 'srcclr-api-token', variable: 'SRCCLR_API_TOKEN')]) {
+                                    powershell '''
+                                        $ErrorActionPreference = "Stop"
+
+                                        # SRCCLR_API_TOKEN is injected by withCredentials.
+                                        # Optional region override:
+                                        #   $env:SRCCLR_REGION = "european"   # or "us"
+
+                                        Set-ExecutionPolicy AllSigned -Scope Process -Force
+                                        $ProgressPreference = "silentlyContinue"
+
+                                        Write-Host "Downloading Veracode SCA agent (ci.ps1)..."
+                                        $client = New-Object System.Net.WebClient
+                                        $script = $client.DownloadString("https://sca-downloads.veracode.com/ci.ps1")
+
+                                        Write-Host "Running Agent-Based SCA scan..."
+                                        Invoke-Command -ScriptBlock ([scriptblock]::Create($script)) `
+                                            -ArgumentList @("scan", "--recursive", "--update-advisor")
+                                    '''
+                                }
+                            } catch (err) {
+                                echo "Agent-Based SCA skipped (srcclr-api-token missing or scan error): ${err}"
+                            }
+                        }
+                    }
+                }
+
+                // -------------------------------------------------------------
+                // Policy Scan: top-level branches only. Production certification.
+                // -------------------------------------------------------------
+                stage('Policy Scan') {
+                    when { expression { env.IS_TOP_LEVEL == 'true' } }
+
+                    steps {
+                        unstash 'verascan-bundle'
+
+                        powershell '''
+                            $ErrorActionPreference = "Stop"
+
+                            Write-Host "Downloading Veracode Java API Wrapper..."
+                            New-Item -ItemType Directory -Force -Path ".veracode" | Out-Null
+
+                            [xml]$metadata = (Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml").Content
+                            $version = $metadata.metadata.versioning.latest
+
+                            if (!$version) {
+                                Write-Error "Failed to get API Wrapper version"
+                            }
+
+                            Write-Host "Downloading version: $version"
+                            $wrapperUrl = "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/$version/vosp-api-wrappers-java-$version-dist.zip"
+
+                            Invoke-WebRequest -Uri $wrapperUrl -OutFile ".veracode\\dist.zip"
+                            Expand-Archive -Path ".veracode\\dist.zip" -DestinationPath ".veracode" -Force
+
+                            $jar = Get-ChildItem -Path ".veracode" -Recurse -File -Filter "VeracodeJavaAPI*.jar" | Select-Object -First 1
+                            if (!$jar) {
+                                Write-Error "VeracodeJavaAPI.jar not found"
+                            }
+                            Copy-Item -Force $jar.FullName "vosp-api-wrapper-java.jar"
+
+                            $appName = (Get-Content app_name.txt -Raw).Trim()
+
+                            Write-Host "Uploading to Veracode Platform Policy Scan..."
+                            Write-Host "Application: $appName"
+                            Write-Host "Artifacts to upload:"
+                            Get-ChildItem verascan
+
+                            & java -jar vosp-api-wrapper-java.jar `
+                                -vid "$env:VERACODE_API_ID" `
+                                -vkey "$env:VERACODE_API_KEY" `
+                                -action UploadAndScan `
+                                -appname "$appName" `
+                                -createprofile true `
+                                -autoscan true `
+                                -filepath "verascan" `
+                                -version "$env:BRANCH_NAME $env:BUILD_NUMBER"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Build finished with status: ${currentBuild.currentResult}"
+            cleanWs(deleteDirs: true, notFailBuild: true)
+        }
+        failure {
+            echo "Veracode pipeline failed. Review the stage logs."
+        }
+    }
+}
