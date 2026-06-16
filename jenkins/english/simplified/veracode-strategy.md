@@ -1,6 +1,12 @@
 
 # Veracode Security Pipeline for Jenkins
  
+## Overview
+ 
+The goal is to run both Veracode scans directly inside your existing build pipeline so security runs automatically on every build, with no separate process to maintain. Agent-Based SCA covers your third-party dependencies and the Policy Scan certifies your own code against your Veracode policy.
+ 
+This Jenkinsfile is a working example of how to integrate those scans. Treat it as a starting point, drop it into your repo, wire up the credentials, and adapt the build and branch logic to match your project.
+ 
 Two scan types only:
  
 - **Agent-Based SCA** on every build (third-party dependency analysis)
