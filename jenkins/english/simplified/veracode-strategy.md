@@ -72,9 +72,12 @@ Set at folder, job, or pipeline level.
 
 ### How to Obtain Credentials
 
+On the Service Account:
 1. Sign in to the [Veracode Platform](https://analysiscenter.veracode.com)
 2. Profile menu (top right) > **API Credentials** for the API ID and Key
-3. For SCA: **Agent-Based Scan > Workspace > Agents > Actions > Create > Windows > PowerShell > Create Agent & Generate Token**
+
+On your human user account (Okta):
+1. For SCA: **Agent-Based Scan > Workspace > Agents > Actions > Create > Windows > PowerShell > Create Agent & Generate Token**
 
 ---
 
