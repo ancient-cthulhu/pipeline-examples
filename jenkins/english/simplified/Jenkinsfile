@@ -5,8 +5,8 @@
 //   Agent-Based SCA   -> every build (token-gated, skips gracefully if absent)
 //   Policy Scan       -> top-level branches only (main / master / develop)
 //
-// Tested against: https://github.com/veracode/verademo (Maven, Spring Boot WAR)
-//                 pom at app/pom.xml, WAR builds to app/target/verademo.war
+// Example tested against: https://github.com/veracode/verademo (Maven WAR).
+// For verademo, set VERACODE_SOURCE_DIR=app. Other projects work unchanged.
 //
 // Required Jenkins credentials (Manage Jenkins > Credentials):
 //   - veracode-api-id    Secret text -> Veracode API ID   (required)
@@ -16,12 +16,16 @@
 // Optional environment variables (folder, job, or pipeline level):
 //   - VERACODE_APP_NAME    Override app profile name (default: org/repo, i.e.
 //                          JOB_NAME with the branch segment removed)
-//   - MAVEN_POM_PATH       Path to the Maven pom (default: app/pom.xml)
-//   - VERACODE_SOURCE_DIR  Directory the autopackager scans (default: app)
+//   - VERACODE_SOURCE_DIR  Directory the autopackager scans (default: repo root)
 //   - TOP_LEVEL_BRANCHES   Regex of branches that get a Policy Scan
 //                          (default: main|master|develop)
 //
-// Windows-native: runs on any agent with java, maven, powershell, and curl.
+// Packaging is language-agnostic via the Veracode CLI autopackager. To use your
+// own build instead, see the Package Artifacts stage comment.
+//   Packaging Cheat Sheet: https://docs.veracode.com/cheatsheet/
+//
+// Windows-native: runs on any agent with java, powershell, and curl, plus the
+// build toolchain for your language (the autopackager runs your build).
 // Uses the Veracode CLI, the Java API Wrapper, and the SCA agent directly,
 // so it does not require the Veracode Jenkins plugin.
 // =============================================================================
@@ -68,28 +72,33 @@ pipeline {
             }
         }
 
-        // Build + Package only run when a Policy Scan will follow (top-level branch).
-        stage('Build (Maven)') {
-            when { expression { env.IS_TOP_LEVEL == 'true' } }
-            steps {
-                powershell '''
-                    $ErrorActionPreference = "Stop"
-
-                    $mavenPom = if ($env:MAVEN_POM_PATH) { $env:MAVEN_POM_PATH } else { "app/pom.xml" }
-
-                    Write-Host "Building Maven project: $mavenPom"
-                    mvn -B -f "$mavenPom" clean package -DskipTests
-
-                    Write-Host ""
-                    Write-Host "Build output:"
-                    Get-ChildItem -Recurse -File -Include *.war, *.jar |
-                        Where-Object { $_.FullName -notmatch "\\\\.git\\\\" } |
-                        Select-Object -First 20 |
-                        ForEach-Object { Write-Host $_.FullName }
-                '''
-            }
-        }
-
+        // ---------------------------------------------------------------------
+        // Package Artifacts (top-level branches only, since only the Policy Scan
+        // consumes the output).
+        //
+        // This stage uses the Veracode CLI autopackager, which builds and packages
+        // supported projects in a Veracode-ready format with no language-specific
+        // wiring. It is intentionally generic so this pipeline stays universal.
+        //
+        // REPLACE WITH YOUR OWN BUILD PROCESS IF YOU PREFER:
+        //   If you already build deployable artifacts in CI (mvn/gradle/npm/dotnet/
+        //   etc.), run that build here instead.
+        //
+        //   Skip autopackaging entirely and place your packaged artifact(s)
+        //   into the verascan/ directory so the Policy Scan picks them up.
+        //
+        //   Whichever path you choose, the artifact must meet Veracode packaging
+        //   requirements. Generate exact, language-specific guidance here:
+        //     Packaging Cheat Sheet: https://docs.veracode.com/cheatsheet/
+        //     About autopackaging:   https://docs.veracode.com/r/About_auto_packaging
+        //
+        // Best practices honored below:
+        //   - Package the build output, not source archives of archives.
+        //   - The autopackager runs your build, so the build toolchain for your
+        //     language must be installed on the agent.
+        //   - --trust lets the autopackager run the detected build commands.
+        //   - Validate that at least one artifact was produced before scanning.
+        // ---------------------------------------------------------------------
         stage('Package Artifacts') {
             when { expression { env.IS_TOP_LEVEL == 'true' } }
             steps {
@@ -112,7 +121,9 @@ pipeline {
 
                     $env:VERACODE_APP_NAME_RESOLVED | Out-File -FilePath app_name.txt -Encoding utf8
 
-                    $sourceDir = if ($env:VERACODE_SOURCE_DIR) { $env:VERACODE_SOURCE_DIR } else { "app" }
+                    # Autopackager scans the repo root by default. Override with
+                    # VERACODE_SOURCE_DIR to point at a subdir or your build output.
+                    $sourceDir = if ($env:VERACODE_SOURCE_DIR) { $env:VERACODE_SOURCE_DIR } else { "." }
 
                     Write-Host "Installing Veracode CLI..."
                     Invoke-WebRequest -Uri "https://tools.veracode.com/veracode-cli/install.ps1" -OutFile "install.ps1"
