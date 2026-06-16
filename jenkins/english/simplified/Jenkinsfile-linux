@@ -1,0 +1,223 @@
+// =============================================================================
+// Veracode Security Pipeline for Jenkins
+// =============================================================================
+// Two scan types only:
+//   Agent-Based SCA   -> every build (token-gated, skips gracefully if absent)
+//   Policy Scan       -> top-level branches only (main / master / develop)
+//
+// Agent prerequisites on PATH:
+//   bash, curl, unzip, java (JRE 8+), plus your build toolchain
+//   (the autopackager runs your build, so the build tool must be installed)
+//
+// Required Jenkins credentials (Manage Jenkins > Credentials):
+//   - veracode-api-id    Secret text -> Veracode API ID   (required)
+//   - veracode-api-key   Secret text -> Veracode API Key  (required)
+//   - srcclr-api-token   Secret text -> SCA Agent token   (optional)
+//
+// Optional environment variables (folder, job, or pipeline level):
+//   - VERACODE_APP_NAME    Override app profile name (default: org/repo, i.e.
+//                          JOB_NAME with the branch segment removed)
+//   - VERACODE_SOURCE_DIR  Directory the autopackager scans (default: repo root)
+//   - TOP_LEVEL_BRANCHES   Regex of branches that get a Policy Scan
+//                          (default: main|master|develop)
+//
+// Packaging is language-agnostic via the Veracode CLI autopackager. To use your
+// own build instead, see the Package Artifacts stage comment.
+//   Packaging Cheat Sheet: https://docs.veracode.com/cheatsheet/
+//
+// Uses the Veracode CLI, the Java API Wrapper, and the SCA agent directly,
+// so it does not require the Veracode Jenkins plugin.
+// =============================================================================
+
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        timeout(time: 2, unit: 'HOURS')
+        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        VERACODE_API_ID  = credentials('veracode-api-id')
+        VERACODE_API_KEY = credentials('veracode-api-key')
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+
+                script {
+                    def pattern = (env.TOP_LEVEL_BRANCHES?.trim()) ?: 'main|master|develop'
+                    def isCR    = (env.CHANGE_ID != null)
+                    env.IS_TOP_LEVEL = (env.BRANCH_NAME ==~ /(${pattern})/ && !isCR) ? 'true' : 'false'
+
+                    // App profile is always org/repo, independent of branch. In a
+                    // multibranch job JOB_NAME is org/repo/branch (branch is the last,
+                    // URL-encoded segment), so drop the final path segment.
+                    def jobPath = env.JOB_NAME
+                    def orgRepo = jobPath?.contains('/') ? jobPath.substring(0, jobPath.lastIndexOf('/')) : jobPath
+                    env.VERACODE_APP_NAME_RESOLVED = env.VERACODE_APP_NAME?.trim() ?: orgRepo
+
+                    echo "Branch: ${env.BRANCH_NAME} | Change request: ${isCR} | " +
+                         "Policy Scan eligible: ${env.IS_TOP_LEVEL} | " +
+                         "App profile: ${env.VERACODE_APP_NAME_RESOLVED}"
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // Package Artifacts (top-level branches only, since only the Policy Scan
+        // consumes the output).
+        //
+        // This stage uses the Veracode CLI autopackager, which builds and packages
+        // supported projects in a Veracode-ready format with no language-specific
+        // wiring. It is intentionally generic so this pipeline stays universal.
+        //
+        // REPLACE WITH YOUR OWN BUILD PROCESS IF YOU PREFER:
+        //   If you already build deployable artifacts in CI (mvn/gradle/npm/dotnet/
+        //   etc.), run that build here instead.
+        //
+        //   Skip autopackaging entirely and place your packaged artifact(s)
+        //        into the verascan/ directory so the Policy Scan picks them up.
+        //
+        //   Whichever path you choose, the artifact must meet Veracode packaging
+        //   requirements. Generate exact, language-specific guidance here:
+        //     Packaging Cheat Sheet: https://docs.veracode.com/cheatsheet/
+        //     About autopackaging:   https://docs.veracode.com/r/About_auto_packaging
+        //
+        // Best practices honored below:
+        //   - Package the build output, not source archives of archives.
+        //   - The autopackager runs your build, so the build toolchain for your
+        //     language must be installed on the agent.
+        //   - --trust lets the autopackager run the detected build commands.
+        //   - Validate that at least one artifact was produced before scanning.
+        // ---------------------------------------------------------------------
+        stage('Package Artifacts') {
+            when { expression { env.IS_TOP_LEVEL == 'true' } }
+            steps {
+                sh '''
+                    set -eu
+
+                    # Autopackager auth (Veracode CLI reads these):
+                    export VERACODE_API_KEY_ID="$VERACODE_API_ID"
+                    export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
+
+                    SRC="${VERACODE_SOURCE_DIR:-.}"
+
+                    echo "Installing Veracode CLI..."
+                    curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+
+                    VERACODE_BIN="./veracode"
+                    command -v veracode >/dev/null 2>&1 && VERACODE_BIN="veracode"
+                    "$VERACODE_BIN" version
+
+                    echo "Running Veracode autopackager on: $SRC"
+                    rm -rf verascan && mkdir -p verascan
+                    "$VERACODE_BIN" package --source "$SRC" --output verascan --trust
+
+                    echo "Packaged artifacts:"
+                    find verascan -type f \\( -name '*.war' -o -name '*.jar' -o -name '*.zip' \\) | tee artifact_list.txt
+
+                    if [ ! -s artifact_list.txt ]; then
+                        echo "No packaged artifacts found" >&2
+                        exit 1
+                    fi
+
+                    echo "Total artifacts: $(wc -l < artifact_list.txt)"
+                '''
+            }
+
+            post {
+                success {
+                    stash name: 'verascan-bundle', includes: 'verascan/**'
+                    archiveArtifacts artifacts: 'artifact_list.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Veracode Security Scans') {
+            parallel {
+
+                // -------------------------------------------------------------
+                // Agent-Based SCA: every build. Skips cleanly if the
+                // srcclr-api-token credential is not configured.
+                // -------------------------------------------------------------
+                stage('Agent-Based SCA') {
+                    steps {
+                        script {
+                            try {
+                                withCredentials([string(credentialsId: 'srcclr-api-token', variable: 'SRCCLR_API_TOKEN')]) {
+                                    sh '''
+                                        set -eu
+                                        # SRCCLR_API_TOKEN is injected by withCredentials.
+                                        # Optional region override:
+                                        #   export SRCCLR_REGION="european"   # or "us"
+                                        echo "Running Agent-Based SCA scan..."
+                                        curl -sSL https://sca-downloads.veracode.com/ci.sh | sh -s -- scan --recursive --update-advisor
+                                    '''
+                                }
+                            } catch (err) {
+                                echo "Agent-Based SCA skipped (srcclr-api-token missing or scan error): ${err}"
+                            }
+                        }
+                    }
+                }
+
+                // -------------------------------------------------------------
+                // Policy Scan: top-level branches only. Production certification.
+                // -------------------------------------------------------------
+                stage('Policy Scan') {
+                    when { expression { env.IS_TOP_LEVEL == 'true' } }
+                    steps {
+                        unstash 'verascan-bundle'
+                        sh '''
+                            set -eu
+                            BASE="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java"
+
+                            echo "Resolving latest Java API Wrapper..."
+                            VERSION=$(curl -fsSL "$BASE/maven-metadata.xml" | sed -n 's:.*<latest>\\(.*\\)</latest>.*:\\1:p')
+                            [ -n "$VERSION" ] || { echo "Failed to get API Wrapper version" >&2; exit 1; }
+                            echo "Version: $VERSION"
+
+                            rm -rf .veracode && mkdir -p .veracode
+                            curl -fsSL -o .veracode/dist.zip "$BASE/$VERSION/vosp-api-wrappers-java-$VERSION-dist.zip"
+                            unzip -o -q .veracode/dist.zip -d .veracode
+
+                            JAR=$(find .veracode -name 'VeracodeJavaAPI*.jar' | head -n 1)
+                            [ -n "$JAR" ] || { echo "VeracodeJavaAPI.jar not found" >&2; exit 1; }
+
+                            echo "Uploading to Veracode Platform Policy Scan..."
+                            echo "Application: $VERACODE_APP_NAME_RESOLVED"
+                            ls -la verascan
+
+                            java -jar "$JAR" \\
+                                -vid "$VERACODE_API_ID" \\
+                                -vkey "$VERACODE_API_KEY" \\
+                                -action UploadAndScan \\
+                                -appname "$VERACODE_APP_NAME_RESOLVED" \\
+                                -createprofile true \\
+                                -autoscan true \\
+                                -filepath "verascan" \\
+                                -version "$BRANCH_NAME $BUILD_NUMBER"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Build finished with status: ${currentBuild.currentResult}"
+            cleanWs(deleteDirs: true, notFailBuild: true)
+        }
+        failure {
+            echo "Veracode pipeline failed. Review the stage logs."
+        }
+    }
+}
