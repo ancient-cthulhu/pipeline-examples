@@ -11,6 +11,7 @@ Two scan types only:
  
 - **Agent-Based SCA** on every build (third-party dependency analysis)
 - **Policy Scan** on top-level branches only (production certification)
+  
 **Supported Technologies**: Java (Maven/Gradle/Ant), .NET, Node.js, Python, Go, PHP, Ruby, Scala, and more.
  
 **Pipeline Type**: Declarative, designed for **Multibranch Pipeline** jobs (or equivalent: GitHub Organization, Bitbucket Team, GitLab Group). Top-level branch detection requires a multibranch context.
