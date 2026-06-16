@@ -1,6 +1,5 @@
 
-Veracode strategy · MD
-# Veracode Security Pipeline for Jenkins (Simplified)
+# Veracode Security Pipeline for Jenkins
  
 Two scan types only:
  
@@ -10,7 +9,7 @@ Two scan types only:
  
 **Pipeline Type**: Declarative, designed for **Multibranch Pipeline** jobs (or equivalent: GitHub Organization, Bitbucket Team, GitLab Group). Top-level branch detection requires a multibranch context.
  
-**Host**: Windows-native (PowerShell). Agents need `java`, `powershell`, and `curl` on `PATH`, plus the build toolchain for your language, since the autopackager runs your build.
+**Agent prerequisites** on `PATH`: `bash`, `curl`, `unzip`, `java` (JRE 8+), plus your build toolchain (Maven, Gradle, npm, dotnet, etc.). The build toolchain is required because the autopackager runs your build.
  
 ---
  
@@ -31,7 +30,7 @@ Top-level branches are configurable via `TOP_LEVEL_BRANCHES` (regex, default `ma
 Trigger: SCM push / change request
         |
         v
-Checkout  (always)  -> resolves IS_TOP_LEVEL flag
+Checkout  (always)  -> resolves IS_TOP_LEVEL + app profile name
         |
         v
 Package Artifacts    when IS_TOP_LEVEL  -> autopackager -> stash verascan bundle
@@ -61,13 +60,12 @@ Configure under **Manage Jenkins > Credentials > System > Global credentials**.
  
 ### Optional Environment Variables
  
-Set at folder, job, or pipeline level.
- 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `VERACODE_APP_NAME` | `org/repo` | Override the Veracode application profile name |
 | `VERACODE_SOURCE_DIR` | repo root | Directory the autopackager scans (or your build output) |
 | `TOP_LEVEL_BRANCHES` | `main\|master\|develop` | Regex of branches that get a Policy Scan |
+ 
  
 
 ### How to Obtain Credentials
