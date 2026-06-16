@@ -85,7 +85,7 @@ On the Service Account:
 2. Profile menu (top right) > **API Credentials** for the API ID and Key
 
 On your human user account (Okta):
-1. For SCA: **Agent-Based Scan > Workspace > Agents > Actions > Create > Windows > PowerShell > Create Agent & Generate Token**
+1. For SCA: **Agent-Based Scan > Workspace > Agents > Actions > Create > Jenkins > Create Agent & Generate Token**
 
 
 ---
