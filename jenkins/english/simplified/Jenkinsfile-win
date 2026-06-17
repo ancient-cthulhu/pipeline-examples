@@ -75,6 +75,29 @@ pipeline {
         }
 
         // ---------------------------------------------------------------------
+        // Install the Veracode CLI once (every build). The installer places
+        // veracode.exe under %USERPROFILE%\.veracode-cli, which persists on the
+        // agent, so both Package Artifacts and the Container/IaC/Secrets Scan
+        // reuse it instead of each installing their own copy.
+        // ---------------------------------------------------------------------
+        stage('Install Veracode CLI') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+                    $ProgressPreference = "silentlyContinue"
+
+                    Write-Host "Installing Veracode CLI..."
+                    Invoke-WebRequest -Uri "https://tools.veracode.com/veracode-cli/install.ps1" -OutFile "install.ps1"
+                    powershell -NoProfile -ExecutionPolicy Bypass -File ".\\install.ps1"
+
+                    $veracodeExe = Join-Path $env:USERPROFILE ".veracode-cli\\veracode.exe"
+                    if (!(Test-Path $veracodeExe)) { $veracodeExe = "veracode" }
+                    & $veracodeExe version
+                '''
+            }
+        }
+
+        // ---------------------------------------------------------------------
         // Package Artifacts (top-level branches only, since only the Policy Scan
         // consumes the output).
         //
@@ -127,18 +150,11 @@ pipeline {
                     # VERACODE_SOURCE_DIR to point at a subdir or your build output.
                     $sourceDir = if ($env:VERACODE_SOURCE_DIR) { $env:VERACODE_SOURCE_DIR } else { "." }
 
-                    Write-Host "Installing Veracode CLI..."
-                    Invoke-WebRequest -Uri "https://tools.veracode.com/veracode-cli/install.ps1" -OutFile "install.ps1"
-                    powershell -NoProfile -ExecutionPolicy Bypass -File ".\\install.ps1"
-
-                    $env:Path += ";$env:USERPROFILE\\.veracode-cli"
-
+                    # Veracode CLI was installed in the Install Veracode CLI stage.
                     $veracodeExe = Join-Path $env:USERPROFILE ".veracode-cli\\veracode.exe"
                     if (!(Test-Path $veracodeExe)) {
                         $veracodeExe = "veracode"
                     }
-
-                    & $veracodeExe version
 
                     Write-Host "Running Veracode autopackager on: $sourceDir"
                     New-Item -ItemType Directory -Force -Path verascan | Out-Null
@@ -229,6 +245,9 @@ pipeline {
                         powershell '''
                             $ErrorActionPreference = "Stop"
                             $ProgressPreference = "silentlyContinue"
+                            # Keep native nonzero exits from throwing, so scan findings
+                            # stay non-gating even if the agent sets this to $true.
+                            $PSNativeCommandUseErrorActionPreference = $false
 
                             # Veracode CLI reads these for auth (same as autopackager):
                             $env:VERACODE_API_KEY_ID = $env:VERACODE_API_ID
@@ -236,10 +255,7 @@ pipeline {
 
                             $sourceDir = if ($env:VERACODE_SOURCE_DIR) { $env:VERACODE_SOURCE_DIR } else { "." }
 
-                            Write-Host "Installing Veracode CLI..."
-                            Invoke-WebRequest -Uri "https://tools.veracode.com/veracode-cli/install.ps1" -OutFile "install.ps1"
-                            powershell -NoProfile -ExecutionPolicy Bypass -File ".\\install.ps1"
-                            $env:Path += ";$env:USERPROFILE\\.veracode-cli"
+                            # Veracode CLI was installed in the Install Veracode CLI stage.
                             $veracodeExe = Join-Path $env:USERPROFILE ".veracode-cli\\veracode.exe"
                             if (!(Test-Path $veracodeExe)) { $veracodeExe = "veracode" }
 
