@@ -1,9 +1,10 @@
 // =============================================================================
 // Veracode Security Pipeline for Jenkins (Simplified)
 // =============================================================================
-// Two scan types only:
-//   Agent-Based SCA   -> every build (token-gated, skips gracefully if absent)
-//   Policy Scan       -> top-level branches only (main / master / develop)
+// Three scan types:
+//   Agent-Based SCA           -> every build (token-gated, skips if absent)
+//   Container/IaC/Secrets      -> every build (directory scan of source)
+//   Policy Scan                -> top-level branches only (main / master / develop)
 //
 // Example tested against: https://github.com/veracode/verademo (Maven WAR).
 // For verademo, set VERACODE_SOURCE_DIR=app. Other projects work unchanged.
@@ -16,7 +17,8 @@
 // Optional environment variables (folder, job, or pipeline level):
 //   - VERACODE_APP_NAME    Override app profile name (default: org/repo, i.e.
 //                          JOB_NAME with the branch segment removed)
-//   - VERACODE_SOURCE_DIR  Directory the autopackager scans (default: repo root)
+//   - VERACODE_SOURCE_DIR  Directory the autopackager and directory scan use
+//                          (default: repo root)
 //   - TOP_LEVEL_BRANCHES   Regex of branches that get a Policy Scan
 //                          (default: main|master|develop)
 //
@@ -203,6 +205,56 @@ pipeline {
                             } catch (err) {
                                 echo "Agent-Based SCA skipped (srcclr-api-token missing or scan error): ${err}"
                             }
+                        }
+                    }
+                }
+
+                // -------------------------------------------------------------
+                // Container/IaC/Secrets Scan: every build. Scans the checked-out
+                // source as a directory (IaC misconfigurations + secrets). Source
+                // level, so no packaged artifact is required. Non-gating by default.
+                //
+                // Note: with $ErrorActionPreference = "Stop", a native-exe nonzero
+                //   exit does not throw (only cmdlets do), so the $LASTEXITCODE
+                //   check below keeps this stage non-gating.
+                // Gate the build: replace the Write-Host with
+                //   "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }".
+                // Platform results: set analysis_on_platform: true in
+                //   .veracode/veracode.yml to send results to the Veracode Platform.
+                // Secrets: define rules under container_scan: secret-rules: in
+                //   .veracode/veracode.yml; they are applied during the scan.
+                // Policy: add --policy policy-container-scan.rego for pass/fail
+                //   policy results (Rego policy must be downloaded first).
+                // -------------------------------------------------------------
+                stage('Container/IaC/Secrets Scan') {
+                    steps {
+                        powershell '''
+                            $ErrorActionPreference = "Stop"
+                            $ProgressPreference = "silentlyContinue"
+
+                            # Veracode CLI reads these for auth (same as autopackager):
+                            $env:VERACODE_API_KEY_ID = $env:VERACODE_API_ID
+                            $env:VERACODE_API_KEY_SECRET = $env:VERACODE_API_KEY
+
+                            $sourceDir = if ($env:VERACODE_SOURCE_DIR) { $env:VERACODE_SOURCE_DIR } else { "." }
+
+                            Write-Host "Installing Veracode CLI..."
+                            Invoke-WebRequest -Uri "https://tools.veracode.com/veracode-cli/install.ps1" -OutFile "install.ps1"
+                            powershell -NoProfile -ExecutionPolicy Bypass -File ".\\install.ps1"
+                            $env:Path += ";$env:USERPROFILE\\.veracode-cli"
+                            $veracodeExe = Join-Path $env:USERPROFILE ".veracode-cli\\veracode.exe"
+                            if (!(Test-Path $veracodeExe)) { $veracodeExe = "veracode" }
+
+                            Write-Host "Running directory scan (IaC + secrets) on: $sourceDir"
+                            & $veracodeExe scan --type directory --source "$sourceDir" --format json --output container_iac_secrets.json
+                            if ($LASTEXITCODE -ne 0) {
+                                Write-Host "Container/IaC/Secrets scan reported findings or errored (non-gating). Exit: $LASTEXITCODE"
+                            }
+                        '''
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'container_iac_secrets.json', allowEmptyArchive: true
                         }
                     }
                 }
