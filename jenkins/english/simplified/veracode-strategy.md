@@ -132,7 +132,6 @@ Installs the Veracode CLI and runs `veracode scan --type directory --source <dir
 This stage is non-gating by default: the build does not fail on findings. To gate, remove the exit-code handling so a nonzero exit propagates (the Linux variant drops the trailing `|| echo ...`; the Windows variant replaces the `Write-Host` with `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`).
  
 - **Secrets rules**: define detection rules under `container_scan:` `secret-rules:` in your `.veracode/veracode.yml` file; the scan applies them during the run. Supported keys include common providers such as AWS, Adobe, Alibaba, Asana, Atlassian, and asymmetric private keys.
-- **Platform results**: by default results stay local (console and JSON). Set `analysis_on_platform: true` in `veracode.yml` before scanning to send results to the Veracode Platform.
 - **Policy**: add `--policy policy-container-scan.rego` for pass/fail policy results. The Rego policy must be created for Container and IaC scans and downloaded first; a policy mixing SCA and Container/IaC rules cannot be downloaded.
 - **Output formats**: `json` (Syft schema), `cyclonedx` (SBOM), or `table` (console summary) via `--format`.
 - **No build needed**: unlike the Policy Scan, this does not consume the packaged artifact, which is why it runs on every build in parallel with SCA.
