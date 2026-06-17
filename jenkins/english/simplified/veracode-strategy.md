@@ -1,15 +1,15 @@
-
 # Veracode Security Pipeline for Jenkins
  
 ## Overview
  
-The goal is to run both Veracode scans directly inside your existing build pipeline so security runs automatically on every build, with no separate process to maintain. Agent-Based SCA covers your third-party dependencies and the Policy Scan certifies your own code against your Veracode policy.
+The goal is to run the Veracode scans directly inside your existing build pipeline so security runs automatically on every build, with no separate process to maintain. Agent-Based SCA covers your third-party dependencies, the Container/IaC/Secrets scan covers infrastructure-as-code misconfigurations and hardcoded secrets in your source, and the Policy Scan certifies your own code against your Veracode policy.
  
 This Jenkinsfile is a working example of how to integrate those scans. Treat it as a starting point, drop it into your repo, wire up the credentials, and adapt the build and branch logic to match your project.
  
-Two scan types only:
+Three scan types:
  
 - **Agent-Based SCA** on every build (third-party dependency analysis)
+- **Container/IaC/Secrets** on every build (IaC misconfigurations and secrets in source)
 - **Policy Scan** on top-level branches only (production certification)
   
 **Supported Technologies**: Java (Maven/Gradle/Ant), .NET, Node.js, Python, Go, PHP, Ruby, Scala, and more.
@@ -25,6 +25,7 @@ Two scan types only:
 | Context | Veracode Product | Gate | Purpose |
 |---------|------------------|------|---------|
 | Every build | Agent-Based SCA | No | Dependency vulnerability analysis |
+| Every build | Container/IaC/Secrets | No | IaC misconfigurations and secrets in source |
 | `main` / `master` / `develop` | Policy Scan | Optional | Production certification |
  
 Top-level branches are configurable via `TOP_LEVEL_BRANCHES` (regex, default `main|master|develop`). Change requests never trigger a Policy Scan.
@@ -44,14 +45,14 @@ Package Artifacts    when IS_TOP_LEVEL  -> autopackager -> stash verascan bundle
         |
         v
 Veracode Security Scans (parallel)
-   |                         |
-   v                         v
-Agent-Based SCA          Policy Scan
-(every build,            (top-level
- token-gated)             branch only)
+   |                       |                        |
+   v                       v                        v
+Agent-Based SCA      Container/IaC/Secrets      Policy Scan
+(every build,        (every build,              (top-level
+ token-gated)         directory scan)            branch only)
 ```
  
-Package runs only when a Policy Scan will follow, so feature branches and change requests run SCA alone.
+Package runs only when a Policy Scan will follow, so feature branches and change requests run SCA and the Container/IaC/Secrets scan alone.
  
 ---
  
@@ -65,12 +66,14 @@ Configure under **Manage Jenkins > Credentials > System > Global credentials**.
 | `veracode-api-key` | Secret text | Yes | Veracode API Key |
 | `srcclr-api-token` | Secret text | No | SCA Agent token. If absent, the SCA stage skips gracefully |
  
+The Container/IaC/Secrets scan authenticates with `veracode-api-id` and `veracode-api-key` (the Veracode CLI reads them), so it needs no extra credential.
+ 
 ### Optional Environment Variables
  
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `VERACODE_APP_NAME` | `org/repo` | Override the Veracode application profile name |
-| `VERACODE_SOURCE_DIR` | repo root | Directory the autopackager scans (or your build output) |
+| `VERACODE_SOURCE_DIR` | repo root | Directory the autopackager and the directory scan use |
 | `TOP_LEVEL_BRANCHES` | `main\|master\|develop` | Regex of branches that get a Policy Scan |
  
  
@@ -122,7 +125,21 @@ Binds `srcclr-api-token`, installs the SCA agent from `sca-downloads.veracode.co
  
 About 80% of vulnerabilities come from dependencies, so SCA runs on every build regardless of branch.
  
-### 4. Policy Scan (top-level only)
+### 4. Container/IaC/Secrets Scan (every build)
+ 
+Installs the Veracode CLI and runs `veracode scan --type directory --source <dir>` against the checked-out source. A directory (or repo) target runs the IaC scan for infrastructure-as-code misconfigurations plus secrets detection. It scans source directly, so no packaged artifact is needed. Results are written to `container_iac_secrets.json` and archived as a build artifact.
+ 
+This stage is non-gating by default: the build does not fail on findings. To gate, remove the exit-code handling so a nonzero exit propagates (the Linux variant drops the trailing `|| echo ...`; the Windows variant replaces the `Write-Host` with `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`).
+ 
+- **Secrets rules**: define detection rules under `container_scan:` `secret-rules:` in your `.veracode/veracode.yml` file; the scan applies them during the run. Supported keys include common providers such as AWS, Adobe, Alibaba, Asana, Atlassian, and asymmetric private keys.
+- **Platform results**: by default results stay local (console and JSON). Set `analysis_on_platform: true` in `veracode.yml` before scanning to send results to the Veracode Platform.
+- **Policy**: add `--policy policy-container-scan.rego` for pass/fail policy results. The Rego policy must be created for Container and IaC scans and downloaded first; a policy mixing SCA and Container/IaC rules cannot be downloaded.
+- **Output formats**: `json` (Syft schema), `cyclonedx` (SBOM), or `table` (console summary) via `--format`.
+- **No build needed**: unlike the Policy Scan, this does not consume the packaged artifact, which is why it runs on every build in parallel with SCA.
+ 
+**Alternative placement**: to avoid a second CLI install, you can move the `veracode scan` call into the Package Artifacts stage right after the CLI install. That limits the scan to top-level branches, so the every-build parallel stage is preferred for earliest IaC/secrets feedback.
+ 
+### 5. Policy Scan (top-level only)
  
 Unstashes the bundle, downloads the latest Java API Wrapper from Maven Central, and runs `UploadAndScan` with directory upload (`-filepath verascan`). Provides the official certification and traceability for frameworks such as SOC 2 and PCI DSS.
  
@@ -143,6 +160,8 @@ The profile name defaults to `org/repo` and is the same for every branch. In a m
  
 **SCA**: results upload to the workspace tied to the agent token. Review under **Scans & Analysis > Software Composition Analysis** in the Veracode Platform.
  
+**Container/IaC/Secrets**: the JSON report is archived on the Jenkins build. To review in the Veracode Platform, set `analysis_on_platform: true` in `veracode.yml` before scanning.
+ 
 **Policy Scan**: review findings, compliance status, and trends in the application profile at [analysiscenter.veracode.com](https://analysiscenter.veracode.com).
  
 ---
@@ -160,6 +179,10 @@ Adjust the agent arguments in the SCA stage, for example add `--no-upload` for l
 ### SCA fail-on-policy gate (optional)
  
 The SCA stage is non-gating by default. To fail the build on SCA policy violations, set the relevant `SRCCLR_*` threshold environment variables or use `srcclr --pass-fail` semantics, then remove the surrounding `try/catch` so failures propagate.
+ 
+### Container/IaC/Secrets options
+ 
+Adjust the `veracode scan` arguments in that stage: change `--format` (`json`, `cyclonedx`, `table`), add `--policy policy-container-scan.rego` for policy pass/fail, add `--verbose` for detailed output, or `--no-cache` to skip the cached vulnerability database. Configure secret detection rules in `.veracode/veracode.yml`.
  
 ### Use your own build instead of the autopackager
  
@@ -181,6 +204,10 @@ The Package stage failed before `stash` ran. Confirm the autopackager produced a
  
 The `srcclr-api-token` credential is not configured, or the scan threw. Add the credential, or review the stage log for the captured error message.
  
+### Container/IaC/Secrets scan finds nothing
+ 
+The scan only reports IaC misconfigurations and secrets. If the repo has no IaC files (Terraform, CloudFormation, Kubernetes manifests, Dockerfiles, etc.) and no detectable secrets, an empty result is expected. Use `--verbose` to confirm files were inspected, and check `VERACODE_SOURCE_DIR` points at the right directory.
+ 
 ### Sandbox / Policy upload fails
  
 Verify `veracode-api-id` and `veracode-api-key` are configured with upload permissions and that the application profile name has no invalid characters.
@@ -193,8 +220,8 @@ Verify `veracode-api-id` and `veracode-api-key` are configured with upload permi
 2. Create a **Multibranch Pipeline** job pointing at your repository
 3. Add credentials: `veracode-api-id`, `veracode-api-key`, and optionally `srcclr-api-token`
 4. (Optional) Set `VERACODE_APP_NAME`, `VERACODE_SOURCE_DIR`, `TOP_LEVEL_BRANCHES`
-5. Push to a top-level branch to trigger Package and Policy Scan; push elsewhere for SCA only
-6. Review SCA and Policy results in the Veracode Platform
+5. Push to a top-level branch to trigger Package and Policy Scan; push elsewhere for SCA and Container/IaC/Secrets only
+6. Review results in the Veracode Platform and the archived `container_iac_secrets.json` artifact
 ---
  
 ## Resources
@@ -206,4 +233,8 @@ Verify `veracode-api-id` and `veracode-api-key` are configured with upload permi
 - [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers)
 - [Install the SCA agent with PowerShell](https://docs.veracode.com/r/Install_the_Veracode_SCA_Agent_with_PowerShell)
 - [SCA Agent-Based Scans](https://docs.veracode.com/r/Agent_Based_Scans)
+- [Veracode Container Security](https://docs.veracode.com/r/Veracode_Container_Security)
+- [veracode scan command reference](https://docs.veracode.com/r/veracode_scan)
+- [Run Container Security scans](https://docs.veracode.com/r/Run_Container_Security_scans)
+- [Detect secrets in containers and IaC files](https://docs.veracode.com/r/Detect_custom_keywords_and_secrets_in_containers_and_IaC_files)
 - [Jenkins Declarative Pipeline Syntax](https://www.jenkins.io/doc/book/pipeline/syntax/)
