@@ -219,8 +219,6 @@ pipeline {
                 //   check below keeps this stage non-gating.
                 // Gate the build: replace the Write-Host with
                 //   "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }".
-                // Platform results: set analysis_on_platform: true in
-                //   .veracode/veracode.yml to send results to the Veracode Platform.
                 // Secrets: define rules under container_scan: secret-rules: in
                 //   .veracode/veracode.yml; they are applied during the scan.
                 // Policy: add --policy policy-container-scan.rego for pass/fail
