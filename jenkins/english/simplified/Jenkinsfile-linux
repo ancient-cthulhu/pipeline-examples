@@ -1,9 +1,10 @@
 // =============================================================================
 // Veracode Security Pipeline for Jenkins
 // =============================================================================
-// Two scan types only:
-//   Agent-Based SCA   -> every build (token-gated, skips gracefully if absent)
-//   Policy Scan       -> top-level branches only (main / master / develop)
+// Three scan types:
+//   Agent-Based SCA           -> every build (token-gated, skips if absent)
+//   Container/IaC/Secrets      -> every build (directory scan of source)
+//   Policy Scan                -> top-level branches only (main / master / develop)
 //
 // Agent prerequisites on PATH:
 //   bash, curl, unzip, java (JRE 8+), plus your build toolchain
@@ -17,7 +18,8 @@
 // Optional environment variables (folder, job, or pipeline level):
 //   - VERACODE_APP_NAME    Override app profile name (default: org/repo, i.e.
 //                          JOB_NAME with the branch segment removed)
-//   - VERACODE_SOURCE_DIR  Directory the autopackager scans (default: repo root)
+//   - VERACODE_SOURCE_DIR  Directory the autopackager and directory scan use
+//                          (default: repo root)
 //   - TOP_LEVEL_BRANCHES   Regex of branches that get a Policy Scan
 //                          (default: main|master|develop)
 //
@@ -164,6 +166,52 @@ pipeline {
                             } catch (err) {
                                 echo "Agent-Based SCA skipped (srcclr-api-token missing or scan error): ${err}"
                             }
+                        }
+                    }
+                }
+
+                // -------------------------------------------------------------
+                // Container/IaC/Secrets Scan: every build. Scans the checked-out
+                // source as a directory (IaC misconfigurations + secrets). Source
+                // level, so no packaged artifact is required. Non-gating by default.
+                //
+                // Gate the build: remove the trailing "|| echo ..." so a nonzero
+                //   exit propagates and fails the stage on findings/policy breach.
+                // Platform results: set analysis_on_platform: true in
+                //   .veracode/veracode.yml to send results to the Veracode Platform.
+                // Secrets: define rules under container_scan: secret-rules: in
+                //   .veracode/veracode.yml; they are applied during the scan.
+                // Policy: add --policy policy-container-scan.rego for pass/fail
+                //   policy results (Rego policy must be downloaded first).
+                // -------------------------------------------------------------
+                stage('Container/IaC/Secrets Scan') {
+                    steps {
+                        sh '''
+                            set -eu
+
+                            # Veracode CLI reads these for auth (same as autopackager):
+                            export VERACODE_API_KEY_ID="$VERACODE_API_ID"
+                            export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
+
+                            SRC="${VERACODE_SOURCE_DIR:-.}"
+
+                            echo "Installing Veracode CLI..."
+                            curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+                            VERACODE_BIN="./veracode"
+                            command -v veracode >/dev/null 2>&1 && VERACODE_BIN="veracode"
+
+                            echo "Running directory scan (IaC + secrets) on: $SRC"
+                            "$VERACODE_BIN" scan \\
+                                --type directory \\
+                                --source "$SRC" \\
+                                --format json \\
+                                --output container_iac_secrets.json \\
+                                || echo "Container/IaC/Secrets scan reported findings or errored (non-gating)."
+                        '''
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'container_iac_secrets.json', allowEmptyArchive: true
                         }
                     }
                 }
