@@ -73,6 +73,24 @@ pipeline {
         }
 
         // ---------------------------------------------------------------------
+        // Install the Veracode CLI once (every build), so both Package Artifacts
+        // and the Container/IaC/Secrets Scan reuse the same install from the
+        // shared workspace instead of each installing their own copy.
+        // ---------------------------------------------------------------------
+        stage('Install Veracode CLI') {
+            steps {
+                sh '''
+                    set -eu
+                    echo "Installing Veracode CLI..."
+                    curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+                    VERACODE_BIN="./veracode"
+                    command -v veracode >/dev/null 2>&1 && VERACODE_BIN="veracode"
+                    "$VERACODE_BIN" version
+                '''
+            }
+        }
+
+        // ---------------------------------------------------------------------
         // Package Artifacts (top-level branches only, since only the Policy Scan
         // consumes the output).
         //
@@ -111,12 +129,9 @@ pipeline {
 
                     SRC="${VERACODE_SOURCE_DIR:-.}"
 
-                    echo "Installing Veracode CLI..."
-                    curl -fsS https://tools.veracode.com/veracode-cli/install | sh
-
+                    # Veracode CLI was installed in the Install Veracode CLI stage.
                     VERACODE_BIN="./veracode"
                     command -v veracode >/dev/null 2>&1 && VERACODE_BIN="veracode"
-                    "$VERACODE_BIN" version
 
                     echo "Running Veracode autopackager on: $SRC"
                     rm -rf verascan && mkdir -p verascan
@@ -193,8 +208,7 @@ pipeline {
 
                             SRC="${VERACODE_SOURCE_DIR:-.}"
 
-                            echo "Installing Veracode CLI..."
-                            curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+                            # Veracode CLI was installed in the Install Veracode CLI stage.
                             VERACODE_BIN="./veracode"
                             command -v veracode >/dev/null 2>&1 && VERACODE_BIN="veracode"
 
