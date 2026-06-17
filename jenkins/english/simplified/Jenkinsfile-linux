@@ -177,8 +177,6 @@ pipeline {
                 //
                 // Gate the build: remove the trailing "|| echo ..." so a nonzero
                 //   exit propagates and fails the stage on findings/policy breach.
-                // Platform results: set analysis_on_platform: true in
-                //   .veracode/veracode.yml to send results to the Veracode Platform.
                 // Secrets: define rules under container_scan: secret-rules: in
                 //   .veracode/veracode.yml; they are applied during the scan.
                 // Policy: add --policy policy-container-scan.rego for pass/fail
