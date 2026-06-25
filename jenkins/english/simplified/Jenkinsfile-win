@@ -1,5 +1,5 @@
 // =============================================================================
-// Veracode Security Pipeline for Jenkins (Simplified)
+// Veracode Security Pipeline for Jenkins (Simplified, Windows-native)
 // =============================================================================
 // Three scan types:
 //   Agent-Based SCA           -> every build (token-gated, skips if absent)
@@ -15,12 +15,17 @@
 //   - srcclr-api-token   Secret text -> SCA Agent token   (optional)
 //
 // Optional environment variables (folder, job, or pipeline level):
-//   - VERACODE_APP_NAME    Override app profile name (default: org/repo, i.e.
-//                          JOB_NAME with the branch segment removed)
-//   - VERACODE_SOURCE_DIR  Directory the autopackager and directory scan use
-//                          (default: repo root)
-//   - TOP_LEVEL_BRANCHES   Regex of branches that get a Policy Scan
-//                          (default: main|master|develop)
+//   - VERACODE_APP_NAME         Override app profile name (default: org/repo,
+//                               derived from the Git remote URL)
+//   - VERACODE_TEAM             Override the team assigned on profile creation
+//                               (default: the GitHub org from the Git remote URL;
+//                               the team must already exist in your Veracode org)
+//   - VERACODE_SOURCE_DIR       Directory the autopackager and directory scan use
+//                               (default: repo root)
+//   - VERACODE_WRAPPER_VERSION  Pin the Java API Wrapper version instead of
+//                               resolving the latest from Maven Central
+//   - TOP_LEVEL_BRANCHES        Regex of branches that get a Policy Scan
+//                               (default: main|master|develop)
 //
 // Packaging is language-agnostic via the Veracode CLI autopackager. To use your
 // own build instead, see the Package Artifacts stage comment.
@@ -105,6 +110,12 @@ pipeline {
         // supported projects in a Veracode-ready format with no language-specific
         // wiring. It is intentionally generic so this pipeline stays universal.
         //
+        // IMPORTANT - the autopackager runs your build, it does not run your prep.
+        //   It will not unpack a source tarball, run rpmbuild %prep, run autotools/
+        //   cmake/meson generation, or any codegen. If your project is not buildable
+        //   straight from a plain checkout, do that prep first and point
+        //   VERACODE_SOURCE_DIR at the prepared, buildable directory.
+        //
         // REPLACE WITH YOUR OWN BUILD PROCESS IF YOU PREFER:
         //   If you already build deployable artifacts in CI (mvn/gradle/npm/dotnet/
         //   etc.), run that build here instead.
@@ -128,14 +139,19 @@ pipeline {
             when { expression { env.IS_TOP_LEVEL == 'true' } }
             steps {
                 script {
-                    // Always org/repo, independent of branch. In a multibranch job
-                    // JOB_NAME is org/repo/branch (the branch is the last, URL-encoded
-                    // segment), so drop the final path segment.
-                    def jobPath = env.JOB_NAME
-                    def orgRepo = jobPath?.contains('/') ? jobPath.substring(0, jobPath.lastIndexOf('/')) : jobPath
-                    def appName = env.VERACODE_APP_NAME?.trim() ?: orgRepo
-                    env.VERACODE_APP_NAME_RESOLVED = appName
-                    echo "Veracode Application Profile: ${appName}"
+                    // App profile is org/repo and the team is the org. Derive both from
+                    // the Git remote URL, not JOB_NAME (the Jenkins folder path can be
+                    // several segments deep, e.g. Postal/DQL/Oel8 Builds/..., which is
+                    // not the GitHub org/repo). Supports https and ssh remotes.
+                    def remote = powershell(script: 'git config --get remote.origin.url', returnStdout: true).trim()
+                    def m = (remote =~ /[\/:]([^\/:]+)\/([^\/]+?)(?:\.git)?$/)
+                    def org  = m ? m[0][1] : ''
+                    def repo = m ? m[0][2] : ''
+                    def orgRepo = (org && repo) ? "${org}/${repo}" : (env.JOB_NAME ?: 'unknown')
+
+                    env.VERACODE_APP_NAME_RESOLVED = env.VERACODE_APP_NAME?.trim() ?: orgRepo
+                    env.VERACODE_TEAM_RESOLVED     = env.VERACODE_TEAM?.trim() ?: org
+                    echo "Veracode Application Profile: ${env.VERACODE_APP_NAME_RESOLVED} | Team: ${env.VERACODE_TEAM_RESOLVED}"
                 }
 
                 powershell '''
@@ -144,11 +160,21 @@ pipeline {
                     $env:VERACODE_API_KEY_ID = $env:VERACODE_API_ID
                     $env:VERACODE_API_KEY_SECRET = $env:VERACODE_API_KEY
 
+                    # Persist resolved app name and team for the Policy Scan stage.
                     $env:VERACODE_APP_NAME_RESOLVED | Out-File -FilePath app_name.txt -Encoding utf8
+                    $env:VERACODE_TEAM_RESOLVED     | Out-File -FilePath team_name.txt -Encoding utf8
 
                     # Autopackager scans the repo root by default. Override with
                     # VERACODE_SOURCE_DIR to point at a subdir or your build output.
                     $sourceDir = if ($env:VERACODE_SOURCE_DIR) { $env:VERACODE_SOURCE_DIR } else { "." }
+
+                    # Optional, repo-supplied prep/build for projects that are not
+                    # buildable from a plain checkout (codegen, generators, etc.).
+                    # Runs only if the repo provides it.
+                    if (Test-Path ".veracode\\prepare.ps1") {
+                        Write-Host "Running repo-specific prepare step (.veracode\\prepare.ps1)..."
+                        & powershell -NoProfile -ExecutionPolicy Bypass -File ".veracode\\prepare.ps1"
+                    }
 
                     # Veracode CLI was installed in the Install Veracode CLI stage.
                     $veracodeExe = Join-Path $env:USERPROFILE ".veracode-cli\\veracode.exe"
@@ -181,7 +207,7 @@ pipeline {
             post {
                 success {
                     stash name: 'verascan-bundle',
-                          includes: 'verascan/**,artifact_list.txt,app_name.txt'
+                          includes: 'verascan/**,artifact_list.txt,app_name.txt,team_name.txt'
                     archiveArtifacts artifacts: 'artifact_list.txt', allowEmptyArchive: true
                 }
             }
@@ -284,21 +310,38 @@ pipeline {
 
                         powershell '''
                             $ErrorActionPreference = "Stop"
+                            $ProgressPreference = "silentlyContinue"
+
+                            $base = "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java"
 
                             Write-Host "Downloading Veracode Java API Wrapper..."
                             New-Item -ItemType Directory -Force -Path ".veracode" | Out-Null
 
-                            [xml]$metadata = (Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml").Content
-                            $version = $metadata.metadata.versioning.latest
+                            # Pin a known-good version to avoid depending on Maven
+                            # Central at gate time. Otherwise resolve it robustly.
+                            $version = $env:VERACODE_WRAPPER_VERSION
 
                             if (!$version) {
-                                Write-Error "Failed to get API Wrapper version"
+                                try {
+                                    [xml]$metadata = (Invoke-WebRequest -Uri "$base/maven-metadata.xml" -UseBasicParsing).Content
+                                }
+                                catch {
+                                    Write-Error "Could not reach Maven Central for API Wrapper metadata: $_"
+                                }
+                                # Prefer <release>, fall back to <latest>, then the last <version>.
+                                $version = $metadata.metadata.versioning.release
+                                if (!$version) { $version = $metadata.metadata.versioning.latest }
+                                if (!$version) { $version = ($metadata.metadata.versioning.versions.version | Select-Object -Last 1) }
                             }
 
-                            Write-Host "Downloading version: $version"
-                            $wrapperUrl = "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/$version/vosp-api-wrappers-java-$version-dist.zip"
+                            if (!$version) {
+                                Write-Error "Failed to resolve API Wrapper version"
+                            }
 
-                            Invoke-WebRequest -Uri $wrapperUrl -OutFile ".veracode\\dist.zip"
+                            Write-Host "Using Java API Wrapper version: $version"
+                            $wrapperUrl = "$base/$version/vosp-api-wrappers-java-$version-dist.zip"
+
+                            Invoke-WebRequest -Uri $wrapperUrl -OutFile ".veracode\\dist.zip" -UseBasicParsing
                             Expand-Archive -Path ".veracode\\dist.zip" -DestinationPath ".veracode" -Force
 
                             $jar = Get-ChildItem -Path ".veracode" -Recurse -File -Filter "VeracodeJavaAPI*.jar" | Select-Object -First 1
@@ -308,17 +351,22 @@ pipeline {
                             Copy-Item -Force $jar.FullName "vosp-api-wrapper-java.jar"
 
                             $appName = (Get-Content app_name.txt -Raw).Trim()
+                            $team    = (Get-Content team_name.txt -Raw).Trim()
 
                             Write-Host "Uploading to Veracode Platform Policy Scan..."
                             Write-Host "Application: $appName"
+                            Write-Host "Team: $team"
                             Write-Host "Artifacts to upload:"
                             Get-ChildItem verascan
 
+                            # -teams is required when -createprofile creates a brand-new
+                            # profile; the team must already exist in your Veracode org.
                             & java -jar vosp-api-wrapper-java.jar `
                                 -vid "$env:VERACODE_API_ID" `
                                 -vkey "$env:VERACODE_API_KEY" `
                                 -action UploadAndScan `
                                 -appname "$appName" `
+                                -teams "$team" `
                                 -createprofile true `
                                 -autoscan true `
                                 -filepath "verascan" `
