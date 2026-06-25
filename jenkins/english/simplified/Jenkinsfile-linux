@@ -19,8 +19,12 @@
 //   - VERACODE_APP_NAME         Override app profile name (default: org/repo,
 //                               derived from the Git remote URL)
 //   - VERACODE_TEAM             Override the team assigned on profile creation
-//                               (default: the GitHub org from the Git remote URL;
-//                               the team must already exist in your Veracode org)
+//                               (default: VERACODE_TEAM_PREFIX + the GitHub org).
+//                               The team must already exist in your Veracode org.
+//   - VERACODE_TEAM_PREFIX      String prepended to the derived org when building
+//                               the team name (default: empty). Example: set to
+//                               "acxiom-" so org "dql" maps to team "acxiom-dql".
+//                               Ignored when VERACODE_TEAM is set.
 //   - VERACODE_SOURCE_DIR       Directory the autopackager and directory scan use
 //                               (default: repo root)
 //   - VERACODE_WRAPPER_VERSION  Pin the Java API Wrapper version instead of
@@ -63,18 +67,20 @@ pipeline {
                     def isCR    = (env.CHANGE_ID != null)
                     env.IS_TOP_LEVEL = (env.BRANCH_NAME ==~ /(${pattern})/ && !isCR) ? 'true' : 'false'
 
-                    // App profile is org/repo and the team is the org. Derive both from
-                    // the Git remote URL, not JOB_NAME (the Jenkins folder path can be
-                    // several segments deep, e.g. Postal/DQL/Oel8 Builds/..., which is
-                    // not the GitHub org/repo). Supports https and ssh remotes.
+                    // App profile is org/repo; team is VERACODE_TEAM_PREFIX + org.
+                    // Derive org/repo from the Git remote URL (JOB_NAME is the Jenkins
+                    // folder path, not the GitHub org/repo). Parsing is done in shell to
+                    // avoid Groovy regex-escaping issues. Handles https and ssh remotes.
                     def remote = sh(script: 'git config --get remote.origin.url', returnStdout: true).trim()
-                    def m = (remote =~ /[\/:]([^\/:]+)\/([^\/]+?)(?:\.git)?$/)
-                    def org  = m ? m[0][1] : ''
-                    def repo = m ? m[0][2] : ''
-                    def orgRepo = (org && repo) ? "${org}/${repo}" : (env.JOB_NAME ?: 'unknown')
+                    def repo   = sh(script: "basename -s .git '${remote}'", returnStdout: true).trim()
+                    def org    = sh(script: "basename \$(dirname '${remote}') | sed 's/.*[:/]//'", returnStdout: true).trim()
 
+                    def orgRepo    = (org && repo) ? "${org}/${repo}" : (env.JOB_NAME ?: 'unknown')
+                    def teamPrefix = env.VERACODE_TEAM_PREFIX?.trim() ?: ''
+
+                    // VERACODE_APP_NAME / VERACODE_TEAM env overrides win if set.
                     env.VERACODE_APP_NAME_RESOLVED = env.VERACODE_APP_NAME?.trim() ?: orgRepo
-                    env.VERACODE_TEAM_RESOLVED     = env.VERACODE_TEAM?.trim() ?: org
+                    env.VERACODE_TEAM_RESOLVED     = env.VERACODE_TEAM?.trim() ?: (org ? "${teamPrefix}${org}" : '')
 
                     echo "Branch: ${env.BRANCH_NAME} | Change request: ${isCR} | " +
                          "Policy Scan eligible: ${env.IS_TOP_LEVEL} | " +
