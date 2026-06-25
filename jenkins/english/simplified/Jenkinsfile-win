@@ -18,8 +18,12 @@
 //   - VERACODE_APP_NAME         Override app profile name (default: org/repo,
 //                               derived from the Git remote URL)
 //   - VERACODE_TEAM             Override the team assigned on profile creation
-//                               (default: the GitHub org from the Git remote URL;
-//                               the team must already exist in your Veracode org)
+//                               (default: VERACODE_TEAM_PREFIX + the GitHub org).
+//                               The team must already exist in your Veracode org.
+//   - VERACODE_TEAM_PREFIX      String prepended to the derived org when building
+//                               the team name (default: empty). Example: set to
+//                               "acxiom-" so org "dql" maps to team "acxiom-dql".
+//                               Ignored when VERACODE_TEAM is set.
 //   - VERACODE_SOURCE_DIR       Directory the autopackager and directory scan use
 //                               (default: repo root)
 //   - VERACODE_WRAPPER_VERSION  Pin the Java API Wrapper version instead of
@@ -139,18 +143,27 @@ pipeline {
             when { expression { env.IS_TOP_LEVEL == 'true' } }
             steps {
                 script {
-                    // App profile is org/repo and the team is the org. Derive both from
-                    // the Git remote URL, not JOB_NAME (the Jenkins folder path can be
-                    // several segments deep, e.g. Postal/DQL/Oel8 Builds/..., which is
-                    // not the GitHub org/repo). Supports https and ssh remotes.
-                    def remote = powershell(script: 'git config --get remote.origin.url', returnStdout: true).trim()
-                    def m = (remote =~ /[\/:]([^\/:]+)\/([^\/]+?)(?:\.git)?$/)
-                    def org  = m ? m[0][1] : ''
-                    def repo = m ? m[0][2] : ''
-                    def orgRepo = (org && repo) ? "${org}/${repo}" : (env.JOB_NAME ?: 'unknown')
+                    // App profile is org/repo; team is VERACODE_TEAM_PREFIX + org.
+                    // Derive org/repo from the Git remote URL (JOB_NAME is the Jenkins
+                    // folder path, not the GitHub org/repo). Parsing uses plain string
+                    // ops in PowerShell (no regex), so nothing can be mangled by Groovy
+                    // escaping. Handles https and ssh remotes.
+                    def out = powershell(returnStdout: true, script: '''
+                        $u = (git config --get remote.origin.url).Trim()
+                        if ($u.EndsWith(".git")) { $u = $u.Substring(0, $u.Length - 4) }
+                        $p = $u.Replace(":", "/").Split("/")
+                        Write-Output $p[$p.Length - 2]
+                        Write-Output $p[$p.Length - 1]
+                    ''').trim()
+                    def lines = out.readLines()
+                    def org   = lines.size() >= 1 ? lines[0].trim() : ''
+                    def repo  = lines.size() >= 2 ? lines[1].trim() : ''
+
+                    def orgRepo    = (org && repo) ? "${org}/${repo}" : (env.JOB_NAME ?: 'unknown')
+                    def teamPrefix = env.VERACODE_TEAM_PREFIX?.trim() ?: ''
 
                     env.VERACODE_APP_NAME_RESOLVED = env.VERACODE_APP_NAME?.trim() ?: orgRepo
-                    env.VERACODE_TEAM_RESOLVED     = env.VERACODE_TEAM?.trim() ?: org
+                    env.VERACODE_TEAM_RESOLVED     = env.VERACODE_TEAM?.trim() ?: (org ? "${teamPrefix}${org}" : '')
                     echo "Veracode Application Profile: ${env.VERACODE_APP_NAME_RESOLVED} | Team: ${env.VERACODE_TEAM_RESOLVED}"
                 }
 
