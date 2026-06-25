@@ -16,12 +16,17 @@
 //   - srcclr-api-token   Secret text -> SCA Agent token   (optional)
 //
 // Optional environment variables (folder, job, or pipeline level):
-//   - VERACODE_APP_NAME    Override app profile name (default: org/repo, i.e.
-//                          JOB_NAME with the branch segment removed)
-//   - VERACODE_SOURCE_DIR  Directory the autopackager and directory scan use
-//                          (default: repo root)
-//   - TOP_LEVEL_BRANCHES   Regex of branches that get a Policy Scan
-//                          (default: main|master|develop)
+//   - VERACODE_APP_NAME         Override app profile name (default: org/repo,
+//                               derived from the Git remote URL)
+//   - VERACODE_TEAM             Override the team assigned on profile creation
+//                               (default: the GitHub org from the Git remote URL;
+//                               the team must already exist in your Veracode org)
+//   - VERACODE_SOURCE_DIR       Directory the autopackager and directory scan use
+//                               (default: repo root)
+//   - VERACODE_WRAPPER_VERSION  Pin the Java API Wrapper version instead of
+//                               resolving the latest from Maven Central
+//   - TOP_LEVEL_BRANCHES        Regex of branches that get a Policy Scan
+//                               (default: main|master|develop)
 //
 // Packaging is language-agnostic via the Veracode CLI autopackager. To use your
 // own build instead, see the Package Artifacts stage comment.
@@ -58,16 +63,23 @@ pipeline {
                     def isCR    = (env.CHANGE_ID != null)
                     env.IS_TOP_LEVEL = (env.BRANCH_NAME ==~ /(${pattern})/ && !isCR) ? 'true' : 'false'
 
-                    // App profile is always org/repo, independent of branch. In a
-                    // multibranch job JOB_NAME is org/repo/branch (branch is the last,
-                    // URL-encoded segment), so drop the final path segment.
-                    def jobPath = env.JOB_NAME
-                    def orgRepo = jobPath?.contains('/') ? jobPath.substring(0, jobPath.lastIndexOf('/')) : jobPath
+                    // App profile is org/repo and the team is the org. Derive both from
+                    // the Git remote URL, not JOB_NAME (the Jenkins folder path can be
+                    // several segments deep, e.g. Postal/DQL/Oel8 Builds/..., which is
+                    // not the GitHub org/repo). Supports https and ssh remotes.
+                    def remote = sh(script: 'git config --get remote.origin.url', returnStdout: true).trim()
+                    def m = (remote =~ /[\/:]([^\/:]+)\/([^\/]+?)(?:\.git)?$/)
+                    def org  = m ? m[0][1] : ''
+                    def repo = m ? m[0][2] : ''
+                    def orgRepo = (org && repo) ? "${org}/${repo}" : (env.JOB_NAME ?: 'unknown')
+
                     env.VERACODE_APP_NAME_RESOLVED = env.VERACODE_APP_NAME?.trim() ?: orgRepo
+                    env.VERACODE_TEAM_RESOLVED     = env.VERACODE_TEAM?.trim() ?: org
 
                     echo "Branch: ${env.BRANCH_NAME} | Change request: ${isCR} | " +
                          "Policy Scan eligible: ${env.IS_TOP_LEVEL} | " +
-                         "App profile: ${env.VERACODE_APP_NAME_RESOLVED}"
+                         "App profile: ${env.VERACODE_APP_NAME_RESOLVED} | " +
+                         "Team: ${env.VERACODE_TEAM_RESOLVED}"
                 }
             }
         }
@@ -97,6 +109,13 @@ pipeline {
         // This stage uses the Veracode CLI autopackager, which builds and packages
         // supported projects in a Veracode-ready format with no language-specific
         // wiring. It is intentionally generic so this pipeline stays universal.
+        //
+        // IMPORTANT - the autopackager runs your build, it does not run your prep.
+        //   It will not unpack a source tarball, run rpmbuild %prep, run autotools/
+        //   cmake/meson generation, or any codegen. If your project is not buildable
+        //   straight from a plain checkout (for example it needs an rpmbuild %prep
+        //   to materialize a generated makefile), do that prep first and point
+        //   VERACODE_SOURCE_DIR at the prepared, buildable directory.
         //
         // REPLACE WITH YOUR OWN BUILD PROCESS IF YOU PREFER:
         //   If you already build deployable artifacts in CI (mvn/gradle/npm/dotnet/
@@ -128,6 +147,14 @@ pipeline {
                     export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
 
                     SRC="${VERACODE_SOURCE_DIR:-.}"
+
+                    # Optional, repo-supplied prep/build for projects that are not
+                    # buildable from a plain checkout (rpmbuild %prep, autotools,
+                    # cmake, codegen, etc.). Runs only if the repo provides it.
+                    if [ -x .veracode/prepare.sh ]; then
+                        echo "Running repo-specific prepare step (.veracode/prepare.sh)..."
+                        .veracode/prepare.sh
+                    fi
 
                     # Veracode CLI was installed in the Install Veracode CLI stage.
                     VERACODE_BIN="./veracode"
@@ -237,12 +264,28 @@ pipeline {
                         unstash 'verascan-bundle'
                         sh '''
                             set -eu
+
                             BASE="https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java"
 
-                            echo "Resolving latest Java API Wrapper..."
-                            VERSION=$(curl -fsSL "$BASE/maven-metadata.xml" | sed -n 's:.*<latest>\\(.*\\)</latest>.*:\\1:p')
-                            [ -n "$VERSION" ] || { echo "Failed to get API Wrapper version" >&2; exit 1; }
-                            echo "Version: $VERSION"
+                            # Pin a known-good version to avoid depending on Maven
+                            # Central at gate time. Otherwise resolve it robustly.
+                            VERSION="${VERACODE_WRAPPER_VERSION:-}"
+
+                            if [ -z "$VERSION" ]; then
+                                echo "Resolving Java API Wrapper version from Maven Central..."
+                                if ! curl -fsSL "$BASE/maven-metadata.xml" -o maven-metadata.xml; then
+                                    echo "Could not reach Maven Central for API Wrapper metadata" >&2
+                                    exit 1
+                                fi
+                                # Prefer <release>, fall back to <latest>, then the last <version>.
+                                # grep -oE avoids backreferences, so nothing for Groovy to mangle.
+                                VERSION=$(grep -oE '<release>[^<]+' maven-metadata.xml | head -1 | sed 's/.*>//' || true)
+                                [ -n "$VERSION" ] || VERSION=$(grep -oE '<latest>[^<]+' maven-metadata.xml | head -1 | sed 's/.*>//' || true)
+                                [ -n "$VERSION" ] || VERSION=$(grep -oE '<version>[^<]+' maven-metadata.xml | tail -1 | sed 's/.*>//' || true)
+                            fi
+
+                            [ -n "$VERSION" ] || { echo "Failed to resolve API Wrapper version" >&2; exit 1; }
+                            echo "Using Java API Wrapper version: $VERSION"
 
                             rm -rf .veracode && mkdir -p .veracode
                             curl -fsSL -o .veracode/dist.zip "$BASE/$VERSION/vosp-api-wrappers-java-$VERSION-dist.zip"
@@ -253,13 +296,17 @@ pipeline {
 
                             echo "Uploading to Veracode Platform Policy Scan..."
                             echo "Application: $VERACODE_APP_NAME_RESOLVED"
+                            echo "Team: $VERACODE_TEAM_RESOLVED"
                             ls -la verascan
 
+                            # -teams is required when -createprofile creates a brand-new
+                            # profile; the team must already exist in your Veracode org.
                             java -jar "$JAR" \\
                                 -vid "$VERACODE_API_ID" \\
                                 -vkey "$VERACODE_API_KEY" \\
                                 -action UploadAndScan \\
                                 -appname "$VERACODE_APP_NAME_RESOLVED" \\
+                                -teams "$VERACODE_TEAM_RESOLVED" \\
                                 -createprofile true \\
                                 -autoscan true \\
                                 -filepath "verascan" \\
