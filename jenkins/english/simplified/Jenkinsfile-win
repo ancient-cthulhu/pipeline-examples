@@ -21,8 +21,7 @@
 //                               (default: VERACODE_TEAM_PREFIX + the GitHub org).
 //                               The team must already exist in your Veracode org.
 //   - VERACODE_TEAM_PREFIX      String prepended to the derived org when building
-//                               the team name (default: empty). Example: set to
-//                               "acxiom-" so org "dql" maps to team "acxiom-dql".
+//                               the team name (default: empty).
 //                               Ignored when VERACODE_TEAM is set.
 //   - VERACODE_SOURCE_DIR       Directory the autopackager and directory scan use
 //                               (default: repo root)
