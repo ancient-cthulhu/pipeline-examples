@@ -24,7 +24,7 @@ Each implementation provides:
 | GitHub Actions | Available | Yes | Yes |
 | GitLab CI/CD | Available | Yes | Yes |
 | AWS CodeBuild | 1/2 Available | - | Yes |
-| Jenkins | Coming soon | - | - |
+| Jenkins | Available | Yes | Yes |
 
 ---
 
