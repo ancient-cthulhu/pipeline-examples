@@ -446,4 +446,3 @@ pipelines:
 - [Ejemplos de Pipeline Scan](https://docs.veracode.com/r/r_pipeline_scan_examples)
 - [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers)
 - [SCA Agent-Based Scans](https://docs.veracode.com/r/Agent_Based_Scans)
-- [Documentacion de Bitbucket Pipelines](https://support.atlassian.com/bitbucket-cloud/docs/get-started-with-bitbucket-pipelines/)
