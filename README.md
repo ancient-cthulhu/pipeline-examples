@@ -4,53 +4,6 @@ Repository that provides example CI/CD pipeline configurations for Veracode inte
 
 ---
 
-## Repository Structure
-
-```
-.
-├── aws/                          
-│   ├── english/                     # Coming soon
-│   └── spanish/
-│       ├── aws-pipeline.yml
-│       └── veracode-strategy.md
-│
-├── ado/
-│   ├── english/
-│   │   ├── azure-pipelines.yml
-│   │   └── veracode-strategy.md
-│   └── spanish/
-│       ├── azure-pipelines.yml
-│       └── veracode-strategy.md
-│
-├── bitbucket/
-│   ├── english/
-│   │   ├── bitbucket-pipelines.yml
-│   │   └── veracode-strategy.md
-│   └── spanish/
-│       ├── bitbucket-pipelines.yml
-│       └── veracode-strategy.md
-│
-├── github-actions/
-│   ├── english/
-│   │   ├── veracode-scans.yml
-│   │   └── veracode-strategy.md
-│   └── spanish/
-│       ├── veracode-scans.yml
-│       └── veracode-strategy.md
-│
-├── gitlab-ci/
-│   ├── english/
-│   │   ├── .gitlab-ci.yml
-│   │   └── veracode-strategy.md
-│   └── spanish/
-│       ├── .gitlab-ci.yml
-│       └── veracode-strategy.md
-│
-└── jenkins/                      # Coming soon
-```
-
----
-
 ## What's Included
 
 Each implementation provides:
