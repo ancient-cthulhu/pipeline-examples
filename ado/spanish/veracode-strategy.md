@@ -1,236 +1,158 @@
-# Estrategia de Seguridad con Veracode para Azure Pipelines
+# Pipeline de Seguridad Veracode para Azure Pipelines
 
-Estrategia de seguridad automatizada que integra multiples productos Veracode en el SDLC mediante Azure Pipelines, balanceando velocidad de feedback con profundidad de analisis segun el contexto de desarrollo.
+Archivo del pipeline: [`azure-pipelines.yml`](./azure-pipelines.yml). Colocalo en la raiz de tu repositorio y crea un pipeline a partir de el.
 
-**Tecnologias Soportadas**: Java (Maven/Gradle/Ant), .NET (Core/Framework), Node.js, Python, Go, PHP, Ruby, Scala, y mas.
+**Tecnologias soportadas**: todo lo que soporta el [autopackager de Veracode CLI](https://docs.veracode.com/r/About_auto_packaging). El pool es `ubuntu-latest` (Java preinstalado).
 
 ---
 
 ## Estrategia de Escaneo
 
-| Contexto | Producto Veracode | Tiempo | Gate | Proposito |
-|----------|-------------------|--------|------|-----------|
-| Feature branches | Pipeline Scan | 3-10 min | No | Feedback rapido para desarrolladores |
-| Pull Requests | Pipeline Scan | 3-10 min | Si (Very High/High) | Prevenir vulnerabilidades antes de merge |
-| Release branches | Sandbox Scan | 30-90 min | No | Validacion pre-produccion aislada |
-| Branch main | Policy Scan | 25-60 min | Opcional | Certificacion para produccion |
+| Disparador | Stage | Producto Veracode | Gate |
+|------------|-------|-------------------|------|
+| Push a `feature/*` | `PipelineScan` | Pipeline Scan | Falla con cualquier hallazgo |
+| Pull request a la rama por defecto | `PipelineScan` | Pipeline Scan | Politica `Veracode Recommended Very High` |
+| Push a la rama por defecto | `PolicyScan` | Policy Scan | Politica de la plataforma |
+| Todos los anteriores | `SCA` | SCA basado en agente | No bloqueante |
 
-**Todos los contextos**: SCA Agent-Based (analisis de dependencias)
-
----
-
-## Arquitectura del Pipeline
-
-El pipeline es un unico archivo `azure-pipelines.yml` con stages condicionales. La deteccion de branch se maneja nativamente via `Build.SourceBranch` y `Build.Reason`, sin necesidad de overrides manuales.
-
-```
-Stage 1: Package        (siempre)  - Veracode CLI autopackager
-Stage 2: SCA            (siempre)  - Agent-Based SCA
-Stage 3a: Pipeline Scan (feature)  - SAST rapido, sin gate
-Stage 3b: Pipeline Scan (PR)       - SAST rapido, gate en Very High/High
-Stage 4: Sandbox Scan   (release)  - SAST completo en sandbox
-Stage 5: Policy Scan    (main)     - SAST completo, certificacion produccion
-```
-
-Solo un stage de SAST se ejecuta por build dependiendo del contexto del branch. SCA siempre se ejecuta en paralelo.
+Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` sin hallazgos, `1-200` cantidad de hallazgos que cumplen el criterio, `253-255` timeout o error. Cualquier codigo distinto de cero falla el stage.
 
 ---
 
-## Productos Veracode Utilizados
+## Estructura del Pipeline
 
-### 1. Veracode CLI - Autopackager
-
-Detecta automaticamente el tipo de aplicacion y tecnologia, compila y empaqueta el codigo para analisis, genera artefactos listos para escaneo (JAR, WAR, ZIP, DLL, etc.).
-
-**Por que**: Elimina configuracion manual por tecnologia y garantiza empaquetado consistente.
-
-**Comando**: `veracode package --source . --output verascan --trust`
-
----
-
-### 2. Pipeline Scan
-
-Analisis SAST rapido e incremental. Detecta vulnerabilidades criticas en minutos y genera reportes JSON con linea de codigo exacta.
-
-**Por que en feature branches**: Feedback inmediato durante desarrollo activo sin bloquear el flujo de trabajo.
-
-**Por que en Pull Requests (con gate)**: Previene vulnerabilidades antes de merge. Bloquea codigo inseguro automaticamente e integra seguridad en code review.
-
-**Comando basico**:
-```bash
-java -jar pipeline-scan.jar \
-  -f artefacto.jar \
-  -vid $VERACODE_API_ID \
-  -vkey $VERACODE_API_KEY
+```text
+trigger: main, feature/*        pr: main (solo GitHub/Bitbucket)
+                 |
+     +-----------+------------+
+     |                        |
+  Package                    SCA (dependsOn: [], en paralelo)
+     |
+     +-----------------------------+
+     |                             |
+  PipelineScan                 PolicyScan
+  push feature/*: cualquier    push a DEFAULT_BRANCH:
+  hallazgo falla               UploadAndScan
+  PR a DEFAULT_BRANCH: politica
 ```
 
-**Con gate**:
-```bash
-java -jar pipeline-scan.jar \
-  -f artefactos.zip \
-  --fail_on_severity "Very High, High" \
-  --policy "Veracode Recommended Very High"
+| Stage | Condicion |
+|-------|-----------|
+| `Package`, `SCA` | No es un PR desde fork (`System.PullRequest.IsFork`) |
+| `PipelineScan` | Build que no es PR en `refs/heads/feature/*`, o PR cuyo `System.PullRequest.TargetBranch` es `DEFAULT_BRANCH` |
+| `PolicyScan` | Build que no es PR en `refs/heads/<DEFAULT_BRANCH>` |
+
+La validacion del destino del PR acepta `main` y `refs/heads/main`, asi funciona sin importar el formato del proveedor del repositorio.
+
+---
+
+## Configuracion
+
+### 1. Grupo de variables
+
+**Pipelines > Library > + Variable group**, nombre `veracode-credentials`, luego autorizalo para el pipeline.
+
+| Variable | Secreta | Requerida | Descripcion |
+|----------|---------|-----------|-------------|
+| `VERACODE_API_ID` | Si | Si | Veracode API ID |
+| `VERACODE_API_KEY` | Si | Si | Veracode API Key |
+| `SRCCLR_API_TOKEN` | Si | Para SCA | Token de SCA basado en agente |
+| `VERACODE_APP_NAME` | **No** | No | Nombre del perfil de aplicacion. Por defecto `{org}/{project}/{repo}` |
+
+Las variables secretas no se exponen automaticamente a los scripts, por eso el pipeline las mapea con `env:`. `VERACODE_APP_NAME` debe ser no secreta porque se lee desde el entorno.
+
+Credenciales de API: [Generar credenciales de API](https://docs.veracode.com/r/t_create_api_creds). Token de SCA: [Crear un agente SCA](https://docs.veracode.com/r/t_sc_cli_agent).
+
+### 2. Disparador de pull request
+
+| Repositorio | Como se disparan las ejecuciones de PR |
+|-------------|----------------------------------------|
+| Azure Repos Git | `pr:` en YAML se ignora. Agrega una politica de rama **Build Validation** en la rama por defecto (**Project settings > Repositories > Branches > main > Branch policies**) y marcala como Required. |
+| GitHub, Bitbucket Cloud | Aplica el bloque `pr:` del YAML. |
+
+Ver [Troubleshoot pipeline triggers](https://learn.microsoft.com/en-us/azure/devops/pipelines/troubleshooting/troubleshoot-triggers).
+
+### 3. Rama por defecto
+
+Si tu rama por defecto no es `main`, cambia `DEFAULT_BRANCH` y ambas listas `branches.include`.
+
+---
+
+## Detalle de Stages
+
+### Package
+
+1. Instala Veracode CLI en `$(Agent.TempDirectory)` para que el binario no se publique.
+2. Ejecuta `veracode package --source $(Build.SourcesDirectory) --output verascan --trust` dentro de `$(Build.ArtifactStagingDirectory)/veracode`.
+3. Escribe cada `.war`, `.jar`, `.zip` en `artifact_list.txt` junto a (no dentro de) `verascan/`, y falla si no hay ninguno.
+4. Publica la carpeta como el artefacto de pipeline `veracode`.
+
+Mantener `artifact_list.txt` fuera de `verascan/` evita que se suba a la Plataforma Veracode durante el policy scan.
+
+### SCA
+
+Ejecuta `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor` en paralelo con Package. Los errores se ignoran con `|| echo`. Quita ese sufijo para aplicar la politica de SCA.
+
+### PipelineScan
+
+- Valida que las credenciales tengan valores reales y no macros `$(VAR)` sin expandir.
+- Escanea cada artefacto por separado, continua despues de un fallo y falla el stage al final si algun artefacto fallo.
+- `Build.Reason == PullRequest` agrega `--policy_name "$(PR_GATE_POLICY)"`; los push a feature no agregan argumentos de gate.
+- Publica `scan_results/` como `veracode-pipeline-scan-results-<intento>` incluso si falla.
+
+### PolicyScan
+
+Descarga el ultimo [Veracode Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers) y ejecuta `UploadAndScan` sobre `verascan/`.
+
+| Parametro | Valor |
+|-----------|-------|
+| `-appname` | `VERACODE_APP_NAME` o `{org}/{project}/{repo}` |
+| `-createprofile` / `-autoscan` | `true` |
+| `-filepath` | `verascan` |
+| `-version` | `$(Build.BuildNumber)-$(System.JobAttempt)` (unico al reintentar) |
+
+---
+
+## Notas de Comportamiento
+
+- **Ejecuciones duplicadas (repos GitHub/Bitbucket)**: un push a `feature/x` con un PR abierto puede iniciar una ejecucion CI y una de PR. Usa la ejecucion del PR como check requerido.
+- **PRs desde forks**: se omiten, porque por defecto los secretos no se exponen a builds de forks.
+- **Ejecuciones manuales**: una ejecucion manual en `feature/*` se comporta como un push (Pipeline Scan, cualquier hallazgo falla). En la rama por defecto ejecuta el policy scan.
+
+---
+
+## Personalizacion
+
+**Cambiar la politica del gate de PR**: edita `PR_GATE_POLICY`. Para una politica personalizada, descargala con `--request_policy` y usa `--policy_file` ([parametros](https://docs.veracode.com/r/r_pipeline_scan_commands)).
+
+**Relajar el gate de feature**: define `GATE_ARGS=(--fail_on_severity "Very High, High")` en la rama `else`.
+
+**Escanear todas las ramas que no son la por defecto**: define `trigger.branches.include` como `'*'` y cambia la condicion de feature a:
+
+```yaml
+ne(variables['Build.SourceBranch'], format('refs/heads/{0}', variables['DEFAULT_BRANCH']))
 ```
 
 ---
 
-### 3. Sandbox Scan
+## Solucion de Problemas
 
-Analisis SAST completo en ambiente aislado. Comparacion con escaneos anteriores y reportes detallados sin afectar la politica/perfil de produccion.
-
-**Por que en release branches**: Validacion exhaustiva pre-produccion, testing de fixes sin impactar metricas oficiales.
-
-**Uso**:
-```bash
-java -jar vosp-api-wrapper-java.jar \
-  -action UploadAndScan \
-  -sandboxname "release-candidate" \
-  -createsandbox true \
-  -filepath artefacto.zip
-```
+| Sintoma | Revisar |
+|---------|---------|
+| `VERACODE_API_ID no esta definida` | Grupo de variables no vinculado o no autorizado, o nombre de variable distinto. |
+| Los builds de PR nunca corren (Azure Repos) | Falta la politica de rama Build Validation. `pr:` no aplica a Azure Repos. |
+| `PipelineScan` omitido en PR | El destino del PR no es `DEFAULT_BRANCH`. |
+| Se ignora el nombre de app personalizado | `VERACODE_APP_NAME` esta marcada como secreta, por eso no esta en el entorno del script. Hazla no secreta. |
+| Pipeline Scan sale con `255` | Credenciales invalidas, red bloqueada hacia `api.veracode.com`, o artefacto no soportado. |
+| Pipeline Scan sale con `253` o `254` | Timeout del escaneo. Agrega `--timeout <minutos>` (maximo 60). |
+| `UploadAndScan` rechazado | Puede haber un escaneo previo en curso para el perfil. |
 
 ---
 
-### 4. Policy Scan
+## Recursos
 
-Analisis SAST exhaustivo contra politicas corporativas. Genera certificacion oficial de seguridad con historial completo para compliance y auditoria.
-
-**Por que en main branch**: Certificacion formal para codigo en produccion, cumplimiento de politicas organizacionales, trazabilidad completa para regulaciones (SOC2, PCI-DSS, etc.).
-
-**Uso**:
-```bash
-java -jar vosp-api-wrapper-java.jar \
-  -action UploadAndScan \
-  -appname "ProductionApp" \
-  -autoscan true \
-  -filepath artefacto.jar \
-  -version "v1.2.3"
-```
-
----
-
-### 5. SCA Agent-Based
-
-Analisis de composicion de software para dependencias third-party. Detecta CVEs conocidos, librerias desactualizadas y licencias problematicas.
-
-**Por que en todos los escaneos**: ~80% de vulnerabilidades estan en dependencias. Detecta riesgos de supply chain y complementa SAST con analisis de third-party code.
-
-**Uso**:
-```bash
-curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor
-```
-
----
-
-## Flujo de Seguridad
-
-```
-Commit -> Autopackager -> SCA + SAST (segun branch) -> Resultados
-```
-
-**Fase 1: Empaquetado** (Veracode CLI) - Detecta tecnologia automaticamente, compila y empaqueta codigo.
-
-**Fase 2: Analisis de Composicion** (SCA) - Escanea dependencias third-party, reporta CVEs conocidos.
-
-**Fase 3: Analisis Estatico** (SAST) - Pipeline Scan para dev/PR, Sandbox Scan para release, Policy Scan para produccion.
-
----
-
-## Configuracion en Azure Pipelines
-
-### Configuracion de Variable Group
-
-Crear un variable group llamado `veracode-credentials` en Azure DevOps:
-
-1. Ir a **Pipelines > Library > + Variable group**
-2. Nombre: `veracode-credentials`
-3. Agregar variables:
-
-| Variable | Tipo | Origen |
-|----------|------|--------|
-| `VERACODE_API_ID` | Secreto | Veracode Platform |
-| `VERACODE_API_KEY` | Secreto | Veracode Platform |
-| `SRCCLR_API_TOKEN` | Secreto | Veracode Platform (opcional) |
-
-**Recomendado**: Vincular a Azure Key Vault en lugar de almacenar secretos directamente.
-
-### Variables del Pipeline
-
-| Variable | Proposito | Ejemplo |
-|----------|-----------|---------|
-| `APP_NAME` | Nombre en Veracode Platform | "MiAplicacion" |
-| `SANDBOX_NAME` | Identificador del sandbox | "release-candidate" |
-
-### Deteccion de Branch
-
-El pipeline usa variables nativas de Azure Pipelines para seleccion automatica de escaneo:
-
-| Variable | Uso |
-|----------|-----|
-| `Build.SourceBranch` | Ref completa del branch (ej: `refs/heads/feature/xyz`) |
-| `Build.Reason` | Razon del trigger (`PullRequest`, `IndividualCI`, etc.) |
-| `Build.BuildNumber` | Usado como identificador de version en Veracode |
-
-### Manejo de Variables Secretas
-
-Las variables secretas de variable groups NO se expanden como macro dentro de bloques `script:`. El pipeline usa mappings `env:` para inyectar secretos como variables de entorno, y luego los referencia como `$VERACODE_API_ID` (variable de shell) en el cuerpo del script. Variables no secretas como `$(APP_NAME)` y `$(PACKAGED_FILE)` se expanden normalmente como macro.
-
-### Disparadores de Pull Request (Azure Repos Git)
-
-Cuando se utiliza **Azure Repos Git**, las builds de Pull Request **no se activan únicamente con el bloque `pr:` en el YAML**.
-
-Para garantizar que se ejecute correctamente el **Pipeline Scan para PR (con gate)**, es necesario configurar una **Política de Rama (Branch Policy) con Build Validation** en la rama destino (por ejemplo, `main`):
-
-1. Ir a **Repos → Branches**
-2. Seleccionar la rama destino (`main`)
-3. Abrir **Branch policies**
-4. En **Build validation**, agregar este pipeline
-5. (Opcional) Marcarlo como **Required** para bloquear la finalización del PR si fallan los controles de seguridad
-
-Una vez que la política de rama dispara el pipeline, la lógica del YAML utiliza  
-`Build.Reason = PullRequest` para ejecutar automáticamente la etapa de **Pipeline Scan con gate para PR**.
-
----
-
-## Resultados y Reportes
-
-**Pipeline Scan genera**:
-- `results.json`: Todos los hallazgos
-- `filtered_results.json`: Hallazgos segun policy
-- Codigo de salida: 0 (pass) o 1 (fail)
-- Publicado como Azure Pipeline Artifact
-
-**Policy/Sandbox Scan genera**:
-- Reportes en Veracode Platform
-- PDF descargable
-- Dashboard con metricas y tendencias
-- APIs para integracion con SIEM/tickets
-
-**SCA genera**:
-- Listado de dependencias vulnerables
-- Scores de riesgo por libreria
-- Recomendaciones de actualizacion
-- Analisis de licencias
-
----
-
-## Mejores Practicas
-
-**Shift-Left**: Ejecutar Pipeline Scan en cada commit. Habilitar gates en PRs para bloquear vulnerabilidades High/Very High. Educar al equipo sobre findings comunes.
-
-**Compliance**: Policy Scan obligatorio antes de produccion. Mantener historial de todos los scans. Documentar excepciones y mitigaciones.
-
-**Optimizacion**: Usar Pipeline Scan para iteracion rapida. Reservar Policy Scan para releases oficiales. Cachear dependencias para acelerar builds.
-
-**SCA**: Monitorear CVEs nuevos continuamente. Actualizar dependencias regularmente. Revisar licencias antes de adoptar librerias.
-
-**Especifico de Azure**: Usar variable groups vinculados a Key Vault para rotacion de credenciales. Agregar branch policies para requerir que Pipeline Scan pase antes de completar PR. Usar environments con approval gates para el stage de Policy Scan en produccion.
-
----
-
-## Soporte
-
-- **Documentacion Veracode**: [docs.veracode.com](https://docs.veracode.com)
-- **Veracode CLI**: [https://docs.veracode.com/r/Install_the_Veracode_CLI](https://docs.veracode.com/r/Install_the_Veracode_CLI)
-- **Pipeline Scan**: [https://docs.veracode.com/r/Pipeline_Scan](https://docs.veracode.com/r/Pipeline_Scan)
-- **SCA**: [https://docs.veracode.com/r/Agent_Based_Scans](https://docs.veracode.com/r/Agent_Based_Scans)
+- [Disparadores de Azure Pipelines](https://learn.microsoft.com/en-us/azure/devops/pipelines/build/triggers)
+- [Build de repositorios Azure Repos Git](https://learn.microsoft.com/en-us/azure/devops/pipelines/repos/azure-repos-git)
+- [Parametros de Pipeline Scan](https://docs.veracode.com/r/r_pipeline_scan_commands)
+- [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers)
+- [Script CI de SCA](https://docs.veracode.com/r/c_sc_ci_script)

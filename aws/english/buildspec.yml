@@ -1,0 +1,197 @@
+# =============================================================================
+# CI - Veracode (AWS CodeBuild)
+#
+# Credentials: AWS Secrets Manager secret "veracode/credentials" (JSON):
+#   { "VERACODE_API_ID": "...", "VERACODE_API_KEY": "...", "SRCCLR_API_TOKEN": "..." }
+# The CodeBuild service role needs secretsmanager:GetSecretValue on it.
+#
+# Optional project environment variables:
+#   VERACODE_APP_NAME   Application profile name (default: CodeBuild project name)
+#   DEFAULT_BRANCH      Default branch name      (default: main)
+#   BRANCH_NAME         Branch name when started by CodePipeline (no webhook vars)
+#   SCAN_MODE           Force a mode: policy | feature | pr | skip
+#
+# Scan selection (resolved at the start of the build phase):
+#   push to default branch   (webhook PUSH)          -> Policy Scan
+#   push to feature/*        (webhook PUSH)          -> Pipeline Scan (fails on any flaw)
+#   PR to default branch     (webhook PULL_REQUEST_*) -> Pipeline Scan (policy gate)
+#   anything else                                     -> skip
+#   SCA runs whenever a scan runs (non-blocking)
+#
+# Webhook filter groups: see veracode-strategy.md.
+# =============================================================================
+
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    PR_GATE_POLICY: "Veracode Recommended Very High"
+  secrets-manager:
+    VERACODE_API_ID: "veracode/credentials:VERACODE_API_ID"
+    VERACODE_API_KEY: "veracode/credentials:VERACODE_API_KEY"
+    # Uncomment when the secret contains an SCA agent token
+    # SRCCLR_API_TOKEN: "veracode/credentials:SRCCLR_API_TOKEN"
+
+phases:
+  install:
+    runtime-versions:
+      java: corretto17
+    commands:
+      - command -v unzip >/dev/null || (apt-get update -qq && apt-get install -y -qq unzip) || yum install -y -q unzip
+
+  build:
+    commands:
+      # -----------------------------------------------------------------------
+      # RESOLVE SCAN MODE (same shell as the commands below)
+      # -----------------------------------------------------------------------
+      - |
+        DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+        TRIGGER="${CODEBUILD_WEBHOOK_TRIGGER:-}"
+        if [ -z "${SCAN_MODE:-}" ]; then
+          case "$TRIGGER" in
+            pr/*)
+              if [ "${CODEBUILD_WEBHOOK_BASE_REF:-}" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                SCAN_MODE=pr
+              else
+                SCAN_MODE=skip
+              fi
+              ;;
+            *)
+              BRANCH="${TRIGGER#branch/}"
+              BRANCH="${BRANCH:-${BRANCH_NAME:-}}"
+              case "$BRANCH" in
+                "$DEFAULT_BRANCH") SCAN_MODE=policy ;;
+                feature/*)         SCAN_MODE=feature ;;
+                *)                 SCAN_MODE=skip ;;
+              esac
+              ;;
+          esac
+        fi
+        echo "Trigger: ${TRIGGER:-none}  Branch: ${BRANCH:-n/a}  Scan mode: $SCAN_MODE"
+      - |
+        if [ "$SCAN_MODE" != "skip" ] && { [ -z "$VERACODE_API_ID" ] || [ -z "$VERACODE_API_KEY" ]; }; then
+          echo "ERROR: VERACODE_API_ID and VERACODE_API_KEY are required"
+          exit 1
+        fi
+
+      # -----------------------------------------------------------------------
+      # PACKAGE: Veracode CLI autopackager
+      # -----------------------------------------------------------------------
+      - |
+        if [ "$SCAN_MODE" != "skip" ]; then
+          curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+          ./veracode version
+          mkdir -p verascan
+          ./veracode package --source . --output verascan --trust
+          ls -lhR verascan
+          find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
+          if [ ! -s artifact_list.txt ]; then
+            echo "ERROR: No packaged artifacts found"
+            exit 1
+          fi
+          echo "Artifacts found ($(wc -l < artifact_list.txt)):"
+          cat artifact_list.txt
+        else
+          echo "No Veracode scan for this trigger"
+        fi
+
+      # -----------------------------------------------------------------------
+      # SCA: Agent-based SCA (non-blocking)
+      # -----------------------------------------------------------------------
+      - |
+        if [ "$SCAN_MODE" != "skip" ]; then
+          curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
+        fi
+
+      # -----------------------------------------------------------------------
+      # PIPELINE SCAN: feature (any flaw fails) and pr (policy gate)
+      # -----------------------------------------------------------------------
+      - |
+        if [ "$SCAN_MODE" = "feature" ] || [ "$SCAN_MODE" = "pr" ]; then
+          curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -o pipeline-scan-LATEST.zip pipeline-scan.jar
+
+          GATE_ARGS=()
+          if [ "$SCAN_MODE" = "pr" ]; then
+            GATE_ARGS=(--policy_name "$PR_GATE_POLICY")
+            echo "Gate: policy '$PR_GATE_POLICY'"
+          else
+            echo "Gate: fail on any flaw"
+          fi
+
+          mkdir -p scan_results
+          FAILED=0
+          FAILED_ARTIFACTS=""
+
+          while IFS= read -r artifact; do
+            NAME=$(basename "$artifact")
+            echo "=========================================="
+            echo "Scanning: $NAME"
+            echo "=========================================="
+
+            set +e
+            java -jar pipeline-scan.jar \
+              -f "$artifact" \
+              -vid "$VERACODE_API_ID" \
+              -vkey "$VERACODE_API_KEY" \
+              --issue_details true \
+              "${GATE_ARGS[@]}"
+            RC=$?
+            set -e
+
+            # 0 = pass, 1-200 = flaw count, 253-255 = error or timeout
+            if [ "$RC" -ge 253 ]; then
+              echo "ERROR: Scan error for $NAME (exit $RC)"
+              FAILED=1; FAILED_ARTIFACTS="$FAILED_ARTIFACTS $NAME"
+            elif [ "$RC" -ne 0 ]; then
+              echo "ERROR: $RC flaw(s) failed the gate for $NAME"
+              FAILED=1; FAILED_ARTIFACTS="$FAILED_ARTIFACTS $NAME"
+            fi
+
+            if [ -f results.json ]; then
+              mv results.json "scan_results/${NAME}_results.json"
+            fi
+          done < artifact_list.txt
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "ERROR: Pipeline Scan failed for:$FAILED_ARTIFACTS"
+            exit 1
+          fi
+        fi
+
+      # -----------------------------------------------------------------------
+      # POLICY SCAN: push to default branch
+      # -----------------------------------------------------------------------
+      - |
+        if [ "$SCAN_MODE" = "policy" ]; then
+          BASE=https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java
+          curl -fsS "$BASE/maven-metadata.xml" -o maven-metadata.xml
+          VERSION=$(grep -oPm1 "(?<=<latest>)[^<]+" maven-metadata.xml)
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: Failed to resolve API Wrapper version"
+            exit 1
+          fi
+          echo "API Wrapper version: $VERSION"
+          curl -fsSL "$BASE/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o dist.zip
+          unzip -o dist.zip -d .veracode
+          JAR=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+          if [ -z "$JAR" ]; then
+            echo "ERROR: VeracodeJavaAPI.jar not found"
+            exit 1
+          fi
+
+          # CODEBUILD_BUILD_ID is "<project-name>:<uuid>"
+          APP_NAME="${VERACODE_APP_NAME:-${CODEBUILD_BUILD_ID%%:*}}"
+          echo "Veracode Application Profile: $APP_NAME"
+
+          java -jar "$JAR" \
+            -vid "$VERACODE_API_ID" \
+            -vkey "$VERACODE_API_KEY" \
+            -action UploadAndScan \
+            -appname "$APP_NAME" \
+            -createprofile true \
+            -autoscan true \
+            -filepath verascan \
+            -version "${DEFAULT_BRANCH}-${CODEBUILD_BUILD_NUMBER}"
+        fi

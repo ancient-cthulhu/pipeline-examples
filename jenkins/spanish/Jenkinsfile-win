@@ -1,27 +1,27 @@
 // =============================================================================
-// CI - Veracode (Jenkins, Windows agent, PowerShell)
+// CI - Veracode (Jenkins, agente Windows, PowerShell)
 // =============================================================================
-// Job type: Multibranch Pipeline (provides BRANCH_NAME, CHANGE_ID, CHANGE_TARGET)
-// Tested against: https://github.com/veracode/verademo (pom at app/pom.xml)
+// Tipo de job: Multibranch Pipeline (provee BRANCH_NAME, CHANGE_ID, CHANGE_TARGET)
+// Probado con: https://github.com/veracode/verademo (pom en app/pom.xml)
 //
-// Jenkins credentials (Manage Jenkins > Credentials), kind "Secret text":
+// Credenciales de Jenkins (Manage Jenkins > Credentials), tipo "Secret text":
 //   veracode-api-id      Veracode API ID
 //   veracode-api-key     Veracode API Key
-//   srcclr-api-token     Agent-based SCA token (optional, SCA skipped if missing)
+//   srcclr-api-token     Token de SCA basado en agente (opcional, SCA se omite si falta)
 //
-// Optional job/folder environment variables:
-//   VERACODE_APP_NAME    Application profile name (default: multibranch job path without branch)
-//   MAVEN_POM_PATH       Maven pom path            (default: app/pom.xml)
-//   VERACODE_SOURCE_DIR  Autopackager source dir   (default: app)
+// Variables de entorno opcionales del job/carpeta:
+//   VERACODE_APP_NAME    Nombre del perfil de aplicacion (por defecto: ruta del job multibranch sin la rama)
+//   MAVEN_POM_PATH       Ruta del pom de Maven       (por defecto: app/pom.xml)
+//   VERACODE_SOURCE_DIR  Directorio para autopackager (por defecto: app)
 //
-// Scan selection:
-//   push to default branch          -> Policy Scan (all artifacts, one upload)
-//   push to feature/*               -> Pipeline Scan (fails on any flaw)
-//   change request to default branch -> Pipeline Scan (policy gate)
-//   all of the above                -> Agent-based SCA (non-blocking)
+// Seleccion de escaneo:
+//   push a la rama por defecto       -> Policy Scan (todos los artefactos, una carga)
+//   push a feature/*                 -> Pipeline Scan (falla con cualquier hallazgo)
+//   change request a rama por defecto -> Pipeline Scan (gate de politica)
+//   todos los anteriores             -> SCA basado en agente (no bloqueante)
 //
-// Agent requirements: Windows PowerShell 5.1+, Java 8+, Maven on PATH.
-// If your default branch is not "main", change DEFAULT_BRANCH below.
+// Requisitos del agente: Windows PowerShell 5.1+, Java 8+, Maven en el PATH.
+// Si tu rama por defecto no es "main", cambia DEFAULT_BRANCH abajo.
 // =============================================================================
 
 pipeline {
@@ -43,7 +43,7 @@ pipeline {
 
     stages {
         // ---------------------------------------------------------------------
-        // BUILD: Maven build before the autopackager (verademo layout)
+        // BUILD: build de Maven antes del autopackager (estructura de verademo)
         // ---------------------------------------------------------------------
         stage('Build (Maven)') {
             steps {
@@ -58,19 +58,19 @@ pipeline {
         }
 
         // ---------------------------------------------------------------------
-        // PACKAGE: Veracode CLI autopackager
+        // PACKAGE: Autopackager de Veracode CLI
         // ---------------------------------------------------------------------
-        stage('Package Artifacts') {
+        stage('Empaquetar Artefactos') {
             steps {
                 script {
-                    // Multibranch JOB_NAME is "<folder>/<repo>/<branch>". Drop the
-                    // branch segment so every branch maps to the same profile.
+                    // En multibranch JOB_NAME es "<carpeta>/<repo>/<rama>". Se quita el
+                    // segmento de rama para que todas las ramas usen el mismo perfil.
                     def jobPath = env.JOB_NAME
                     if (env.BRANCH_NAME && jobPath.contains('/')) {
                         jobPath = jobPath.substring(0, jobPath.lastIndexOf('/'))
                     }
                     env.APP_NAME = env.VERACODE_APP_NAME?.trim() ?: jobPath
-                    echo "Veracode Application Profile: ${env.APP_NAME}"
+                    echo "Perfil de Aplicacion Veracode: ${env.APP_NAME}"
                 }
                 powershell '''
                     $ErrorActionPreference = "Stop"
@@ -88,16 +88,16 @@ pipeline {
                     & $veracode package --source "$sourceDir" --output verascan --trust
                     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-                    # Relative paths (.\\verascan\\...) so the list works after unstash
+                    # Rutas relativas (.\\verascan\\...) para que la lista funcione tras unstash
                     $artifacts = Get-ChildItem -Path verascan -Recurse -File -Include *.war, *.jar, *.zip
                     if (-not $artifacts) {
-                        Write-Host "ERROR: No packaged artifacts found"
+                        Write-Host "ERROR: No se encontraron artefactos empaquetados"
                         exit 1
                     }
                     $artifacts | ForEach-Object { Resolve-Path -Relative $_.FullName } |
                         Set-Content -Path artifact_list.txt -Encoding ASCII
 
-                    Write-Host "Artifacts found ($(@($artifacts).Count)):"
+                    Write-Host "Artefactos encontrados ($(@($artifacts).Count)):"
                     Get-Content artifact_list.txt
                 '''
             }
@@ -109,35 +109,35 @@ pipeline {
         }
 
         // ---------------------------------------------------------------------
-        // SECURITY SCANS (parallel)
+        // ESCANEOS DE SEGURIDAD (en paralelo)
         // ---------------------------------------------------------------------
-        stage('Veracode Scans') {
+        stage('Escaneos Veracode') {
             parallel {
                 // -------------------------------------------------------------
-                // SCA: Agent-based SCA via ci.ps1 (non-blocking)
+                // SCA: SCA basado en agente via ci.ps1 (no bloqueante)
                 // -------------------------------------------------------------
-                stage('Agent-Based SCA') {
+                stage('SCA Basado en Agente') {
                     steps {
                         script {
                             try {
                                 withCredentials([string(credentialsId: 'srcclr-api-token', variable: 'SRCCLR_API_TOKEN')]) {
-                                    // returnStatus keeps SCA non-blocking even if ci.ps1 exits non-zero
+                                    // returnStatus mantiene SCA no bloqueante aunque ci.ps1 salga con error
                                     def rc = powershell(returnStatus: true, script: '''
                                         $script = (New-Object System.Net.WebClient).DownloadString("https://sca-downloads.veracode.com/ci.ps1")
                                         Invoke-Command -ScriptBlock ([scriptblock]::Create($script)) -ArgumentList @("scan", "--recursive", "--update-advisor")
                                     ''')
-                                    echo "SCA scan completed (exit ${rc})"
+                                    echo "Escaneo SCA completado (salida ${rc})"
                                 }
                             } catch (org.jenkinsci.plugins.credentialsbinding.impl.CredentialNotFoundException e) {
-                                echo "Credential 'srcclr-api-token' not configured. Skipping SCA."
+                                echo "Credencial 'srcclr-api-token' no configurada. Se omite SCA."
                             }
                         }
                     }
                 }
 
                 // -------------------------------------------------------------
-                // PIPELINE SCAN: feature/* push (any flaw fails) and
-                // change request to default branch (policy gate)
+                // PIPELINE SCAN: push a feature/* (falla con cualquier hallazgo) y
+                // change request a la rama por defecto (gate de politica)
                 // -------------------------------------------------------------
                 stage('Pipeline Scan') {
                     when {
@@ -156,16 +156,16 @@ pipeline {
                                 Invoke-WebRequest -UseBasicParsing -Uri "https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip" -OutFile "pipeline-scan-LATEST.zip"
                                 Expand-Archive -Path "pipeline-scan-LATEST.zip" -DestinationPath "pipeline-scan" -Force
                                 $jar = Get-ChildItem -Path "pipeline-scan" -Recurse -Filter "pipeline-scan.jar" | Select-Object -First 1
-                                if (-not $jar) { Write-Host "ERROR: pipeline-scan.jar not found"; exit 1 }
+                                if (-not $jar) { Write-Host "ERROR: No se encontro pipeline-scan.jar"; exit 1 }
 
-                                # Change request: evaluate findings against a Veracode policy
-                                # feature:        no fail criteria, every flaw counts
+                                # Change request: evalua los hallazgos contra una politica de Veracode
+                                # feature:        sin criterio de fallo, cada hallazgo cuenta
                                 $gateArgs = @()
                                 if ($env:CHANGE_ID) {
                                     $gateArgs = @("--policy_name", $env:PR_GATE_POLICY)
-                                    Write-Host "Gate: policy '$env:PR_GATE_POLICY'"
+                                    Write-Host "Gate: politica '$env:PR_GATE_POLICY'"
                                 } else {
-                                    Write-Host "Gate: fail on any flaw"
+                                    Write-Host "Gate: falla con cualquier hallazgo"
                                 }
 
                                 New-Item -ItemType Directory -Force -Path scan_results | Out-Null
@@ -175,18 +175,18 @@ pipeline {
                                     if (-not $artifact) { continue }
                                     $name = Split-Path $artifact -Leaf
                                     Write-Host "=========================================="
-                                    Write-Host "Scanning: $name"
+                                    Write-Host "Escaneando: $name"
                                     Write-Host "=========================================="
 
                                     & java -jar $jar.FullName -f $artifact -vid $env:VERACODE_API_ID -vkey $env:VERACODE_API_KEY --issue_details true @gateArgs
                                     $rc = $LASTEXITCODE
 
-                                    # 0 = pass, 1-200 = flaw count, 253-255 = error or timeout
+                                    # 0 = aprobado, 1-200 = cantidad de hallazgos, 253-255 = error o timeout
                                     if ($rc -ge 253 -or $rc -lt 0) {
-                                        Write-Host "ERROR: Scan error for $name (exit $rc)"
+                                        Write-Host "ERROR: Error de escaneo en $name (salida $rc)"
                                         $failed += $name
                                     } elseif ($rc -ne 0) {
-                                        Write-Host "ERROR: $rc flaw(s) failed the gate for $name"
+                                        Write-Host "ERROR: $rc hallazgo(s) fallaron el gate en $name"
                                         $failed += $name
                                     }
 
@@ -196,7 +196,7 @@ pipeline {
                                 }
 
                                 if ($failed.Count -gt 0) {
-                                    Write-Host "ERROR: Pipeline Scan failed for: $($failed -join ', ')"
+                                    Write-Host "ERROR: Pipeline Scan fallo para: $($failed -join ', ')"
                                     exit 1
                                 }
                                 exit 0
@@ -211,7 +211,7 @@ pipeline {
                 }
 
                 // -------------------------------------------------------------
-                // POLICY SCAN: push to default branch
+                // POLICY SCAN: push a la rama por defecto
                 // -------------------------------------------------------------
                 stage('Policy Scan') {
                     when {
@@ -227,13 +227,13 @@ pipeline {
                                 $base = "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java"
                                 [xml]$metadata = (Invoke-WebRequest -UseBasicParsing -Uri "$base/maven-metadata.xml").Content
                                 $version = $metadata.metadata.versioning.latest
-                                if (-not $version) { Write-Host "ERROR: Failed to resolve API Wrapper version"; exit 1 }
-                                Write-Host "API Wrapper version: $version"
+                                if (-not $version) { Write-Host "ERROR: No se pudo resolver la version del API Wrapper"; exit 1 }
+                                Write-Host "Version del API Wrapper: $version"
 
                                 Invoke-WebRequest -UseBasicParsing -Uri "$base/$version/vosp-api-wrappers-java-$version-dist.zip" -OutFile "dist.zip"
                                 Expand-Archive -Path "dist.zip" -DestinationPath ".veracode" -Force
                                 $jar = Get-ChildItem -Path ".veracode" -Recurse -Filter "VeracodeJavaAPI*.jar" | Select-Object -First 1
-                                if (-not $jar) { Write-Host "ERROR: VeracodeJavaAPI.jar not found"; exit 1 }
+                                if (-not $jar) { Write-Host "ERROR: No se encontro VeracodeJavaAPI.jar"; exit 1 }
 
                                 & java -jar $jar.FullName `
                                     -vid $env:VERACODE_API_ID `

@@ -1,106 +1,106 @@
 name: CI - Veracode
 
-# Escaneo de Seguridad Veracode para GitHub Actions (Soporte Multi-Artefacto)
+# Escaneo de seguridad Veracode para GitHub Actions
 #
-# Secrets requeridos:
-#   - VERACODE_API_ID: ID de API Veracode
-#   - VERACODE_API_KEY: Key de API Veracode
-#   - SRCCLR_API_TOKEN: Token de agente SCA (opcional)
+# Secretos requeridos:
+#   VERACODE_API_ID     Veracode API ID
+#   VERACODE_API_KEY    Veracode API Key
+# Secretos opcionales:
+#   SRCCLR_API_TOKEN    Token de SCA basado en agente
+#   VERACODE_APP_NAME   Nombre del perfil de aplicacion (por defecto: {org}/{repo})
 #
-# El tipo de escaneo se detecta automaticamente por branch/evento:
-#   feature/*  -> Pipeline Scan (sin gate) - cada artefacto individualmente
-#   PR         -> Pipeline Scan (gate en Very High/High) - cada artefacto individualmente
-#   release/*  -> Sandbox Scan - todos los artefactos subidos a carpeta
-#   main       -> Policy Scan - todos los artefactos subidos a carpeta
+# Seleccion de escaneo:
+#   push a la rama por defecto      -> Policy Scan (todos los artefactos, una carga)
+#   push a feature/**               -> Pipeline Scan (falla con cualquier hallazgo)
+#   pull_request a rama por defecto -> Pipeline Scan (gate de politica)
+#   todos los anteriores            -> SCA basado en agente (no bloqueante)
 #
-# Formato APP_NAME: {org}/{repo} (personalizable via secret VERACODE_APP_NAME)
+# Si tu rama por defecto no es "main", actualiza los filtros de ramas en "on:".
+# Las condiciones de los jobs resuelven la rama por defecto dinamicamente.
 
 on:
   push:
     branches:
       - main
-      - 'release/*'
-      - 'feature/*'
-  pull_request: {}
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Nunca cancelar una carga de politica en curso en la rama por defecto
+  cancel-in-progress: ${{ github.ref_name != github.event.repository.default_branch }}
+
 env:
   VERACODE_API_ID: ${{ secrets.VERACODE_API_ID }}
   VERACODE_API_KEY: ${{ secrets.VERACODE_API_KEY }}
+  PR_GATE_POLICY: Veracode Recommended Very High
 
 jobs:
-  # =============================================================================
-  # EMPAQUETADO: Compilar y empaquetar artefactos con Veracode CLI
-  # =============================================================================
+  # ===========================================================================
+  # PACKAGE: Autopackager de Veracode CLI
+  # ===========================================================================
   package:
     name: Empaquetar Artefactos
     runs-on: ubuntu-latest
+    # Los PRs desde forks no reciben secretos, se omiten
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
     outputs:
-      artifact_count: ${{ steps.list-artifacts.outputs.artifact_count }}
-      app_name: ${{ steps.set-app-name.outputs.app_name }}
+      app_name: ${{ steps.app-name.outputs.app_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Configurar Nombre de App Veracode
-        id: set-app-name
+      - name: Definir Nombre de App Veracode
+        id: app-name
+        env:
+          CUSTOM_APP_NAME: ${{ secrets.VERACODE_APP_NAME }}
+          REPO_NAME: ${{ github.repository }}
         run: |
-          if [ -n "${{ secrets.VERACODE_APP_NAME }}" ]; then
-            APP_NAME="${{ secrets.VERACODE_APP_NAME }}"
-          else
-            APP_NAME="${{ github.repository }}"
-          fi
+          APP_NAME="${CUSTOM_APP_NAME:-$REPO_NAME}"
           echo "Perfil de Aplicacion Veracode: $APP_NAME"
-          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Instalar Veracode CLI
         run: |
-          curl -fsS -O https://tools.veracode.com/veracode-cli/install
-          chmod +x ./install
-          ./install
+          curl -fsS https://tools.veracode.com/veracode-cli/install | sh
           ./veracode version
 
-      - name: Ejecutar Veracode Autopackager
+      - name: Ejecutar Autopackager de Veracode
         run: |
           mkdir -p verascan
           ./veracode package --source . --output verascan --trust
-          echo "Artefactos empaquetados:"
           ls -lhR verascan
 
-      - name: Listar y Validar Artefactos
-        id: list-artifacts
+      - name: Validar Artefactos
         run: |
           find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
-          
           if [ ! -s artifact_list.txt ]; then
             echo "::error::No se encontraron artefactos empaquetados"
-            ls -lR verascan
             exit 1
           fi
-          
-          echo "Artefactos encontrados:"
+          echo "Artefactos encontrados ($(wc -l < artifact_list.txt)):"
           cat artifact_list.txt
-          
-          ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
-          echo "Total de artefactos: $ARTIFACT_COUNT"
-          echo "artifact_count=$ARTIFACT_COUNT" >> $GITHUB_OUTPUT
 
       - name: Subir Artefactos
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: verascan
           path: |
             verascan/
             artifact_list.txt
 
-  # =============================================================================
-  # SCA: Agent-Based SCA (se ejecuta en todos los branches)
-  # =============================================================================
+  # ===========================================================================
+  # SCA: SCA basado en agente (no bloqueante)
+  # ===========================================================================
   sca:
-    name: Agent-Based SCA
+    name: SCA Basado en Agente
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -109,248 +109,134 @@ jobs:
         env:
           SRCCLR_API_TOKEN: ${{ secrets.SRCCLR_API_TOKEN }}
         run: |
-          curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
+          curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
 
-  # =============================================================================
-  # FEATURE: feature/* -> Pipeline Scan (sin gate, cada artefacto)
-  # =============================================================================
-  feature-pipeline-scan:
-    name: Pipeline Scan (feature/*)
+  # ===========================================================================
+  # PIPELINE SCAN: push a feature/** (falla con cualquier hallazgo) y PR (gate de politica)
+  # ===========================================================================
+  pipeline-scan:
+    name: Pipeline Scan (${{ github.event_name == 'pull_request' && 'gate PR' || 'feature' }})
     needs: package
-    if: github.event_name == 'push' && startsWith(github.ref_name, 'feature/')
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref_name != github.event.repository.default_branch)
     runs-on: ubuntu-latest
     steps:
       - name: Descargar Artefactos
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: verascan
 
       - name: Descargar Pipeline Scanner
         run: |
-          curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
-          unzip -o pipeline-scan-LATEST.zip
-          if [ ! -f "pipeline-scan.jar" ]; then
-            echo "::error::No se pudo descargar pipeline-scan.jar"
-            exit 1
-          fi
+          curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -o pipeline-scan-LATEST.zip pipeline-scan.jar
 
       - name: Ejecutar Pipeline Scan (todos los artefactos)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          # PR:      evalua los hallazgos contra una politica de Veracode
+          # feature: sin criterio de fallo, cada hallazgo cuenta en el codigo de salida
+          GATE_ARGS=()
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            GATE_ARGS=(--policy_name "$PR_GATE_POLICY")
+            echo "Gate: politica '$PR_GATE_POLICY'"
+          else
+            echo "Gate: falla con cualquier hallazgo"
+          fi
+
           mkdir -p scan_results
-          SCAN_COUNT=0
-          
+          FAILED=0
+          FAILED_ARTIFACTS=""
+
           while IFS= read -r artifact; do
-            SCAN_COUNT=$((SCAN_COUNT + 1))
-            ARTIFACT_NAME=$(basename "$artifact")
-            echo ""
+            NAME=$(basename "$artifact")
             echo "=========================================="
-            echo "Escaneando [$SCAN_COUNT]: $ARTIFACT_NAME"
+            echo "Escaneando: $NAME"
             echo "=========================================="
-            
+
+            set +e
             java -jar pipeline-scan.jar \
               -f "$artifact" \
-              -vid $VERACODE_API_ID \
-              -vkey $VERACODE_API_KEY \
-              --fail_on_severity "" \
+              -vid "$VERACODE_API_ID" \
+              -vkey "$VERACODE_API_KEY" \
               --issue_details true \
-              -jo true \
-              || echo "Pipeline scan completado con hallazgos para $ARTIFACT_NAME"
-            
-            # Renombrar archivo de resultados con prefijo del nombre del artefacto
-            if [ -f "results.json" ]; then
-              mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
-              echo "Resultados guardados: scan_results/${ARTIFACT_NAME}_results.json"
-            else
-              echo "::warning::No se produjo results.json para $ARTIFACT_NAME (el artefacto puede no ser escaneable)"
+              "${GATE_ARGS[@]}"
+            RC=$?
+            set -e
+
+            # 0 = aprobado, 1-200 = cantidad de hallazgos, 253-255 = error o timeout
+            if [ "$RC" -ge 253 ]; then
+              echo "::error::Error de escaneo en $NAME (salida $RC)"
+              FAILED=1; FAILED_ARTIFACTS="$FAILED_ARTIFACTS $NAME"
+            elif [ "$RC" -ne 0 ]; then
+              echo "::error::$RC hallazgo(s) fallaron el gate en $NAME"
+              FAILED=1; FAILED_ARTIFACTS="$FAILED_ARTIFACTS $NAME"
+            fi
+
+            if [ -f results.json ]; then
+              mv results.json "scan_results/${NAME}_results.json"
             fi
           done < artifact_list.txt
-          
-          echo ""
-          echo "=========================================="
-          echo "Pipeline Scan completado para $SCAN_COUNT artefactos"
-          echo "=========================================="
 
-      - name: Subir Resultados de Escaneo
-        uses: actions/upload-artifact@v4
+          if [ "$FAILED" -eq 1 ]; then
+            echo "::error::Pipeline Scan fallo para:$FAILED_ARTIFACTS"
+          fi
+          exit "$FAILED"
+
+      - name: Subir Resultados del Escaneo
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: pipeline-scan-results
           path: scan_results/
+          if-no-files-found: ignore
 
-  # =============================================================================
-  # PR: Pull Request -> Pipeline Scan (gate habilitado, cada artefacto)
-  # =============================================================================
-  pr-pipeline-scan:
-    name: Pipeline Scan (PR gate)
+  # ===========================================================================
+  # POLICY SCAN: push a la rama por defecto
+  # ===========================================================================
+  policy-scan:
+    name: Policy Scan (rama por defecto)
     needs: package
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     steps:
       - name: Descargar Artefactos
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: verascan
-
-      - name: Descargar Pipeline Scanner
-        run: |
-          curl -sSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
-          unzip -o pipeline-scan-LATEST.zip
-          if [ ! -f "pipeline-scan.jar" ]; then
-            echo "::error::No se pudo descargar pipeline-scan.jar"
-            exit 1
-          fi
-
-      - name: Ejecutar Pipeline Scan con Gate (todos los artefactos)
-        run: |
-          mkdir -p scan_results
-          FAILED=0
-          SCAN_COUNT=0
-          FAILED_ARTIFACTS=""
-          
-          while IFS= read -r artifact; do
-            SCAN_COUNT=$((SCAN_COUNT + 1))
-            ARTIFACT_NAME=$(basename "$artifact")
-            echo ""
-            echo "=========================================="
-            echo "Escaneando [$SCAN_COUNT]: $ARTIFACT_NAME"
-            echo "=========================================="
-            
-            if ! java -jar pipeline-scan.jar \
-              -f "$artifact" \
-              -vid $VERACODE_API_ID \
-              -vkey $VERACODE_API_KEY \
-              --issue_details true \
-              --policy_name "Veracode Recommended Very High" \
-              -jo true; then
-              FAILED=1
-              FAILED_ARTIFACTS="$FAILED_ARTIFACTS $ARTIFACT_NAME"
-              echo "::warning::Policy gate fallido para: $ARTIFACT_NAME"
-            fi
-            
-            # Renombrar archivo de resultados con prefijo del nombre del artefacto
-            if [ -f "results.json" ]; then
-              mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
-              echo "Resultados guardados: scan_results/${ARTIFACT_NAME}_results.json"
-            else
-              echo "::warning::No se produjo results.json para $ARTIFACT_NAME (el artefacto puede no ser escaneable)"
-            fi
-          done < artifact_list.txt
-          
-          echo ""
-          echo "=========================================="
-          echo "Pipeline Scan completado para $SCAN_COUNT artefactos"
-          if [ $FAILED -eq 1 ]; then
-            echo "::error::Policy gate fallido para:$FAILED_ARTIFACTS"
-          fi
-          echo "=========================================="
-          
-          exit $FAILED
-
-      - name: Subir Resultados de Escaneo
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: pipeline-scan-gate-results
-          path: scan_results/
-
-  # =============================================================================
-  # RELEASE: release/* -> Sandbox Upload (todos los artefactos)
-  # =============================================================================
-  release-sandbox-scan:
-    name: Sandbox Upload (release/*)
-    needs: package
-    if: github.event_name == 'push' && startsWith(github.ref_name, 'release/')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Descargar Artefactos
-        uses: actions/download-artifact@v4
-        with:
-          name: verascan
-
-      - name: Listar Artefactos para Upload
-        run: |
-          echo "Artefactos para upload:"
-          ls -lh verascan/
 
       - name: Descargar Veracode Java API Wrapper
         run: |
-          mkdir -p .veracode
-          VERSION=$(curl -sS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+          BASE=https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java
+          curl -fsS "$BASE/maven-metadata.xml" -o maven-metadata.xml
+          VERSION=$(grep -oPm1 "(?<=<latest>)[^<]+" maven-metadata.xml)
           if [ -z "$VERSION" ]; then
-            echo "::error::No se pudo obtener la version del API Wrapper"
+            echo "::error::No se pudo resolver la version del API Wrapper"
             exit 1
           fi
-          echo "Descargando version: $VERSION"
-          curl -sSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
-          cd .veracode && unzip -o dist.zip && cd ..
-          JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
-          if [ -z "$JAR_PATH" ]; then
+          echo "Version del API Wrapper: $VERSION"
+          curl -fsSL "$BASE/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o dist.zip
+          unzip -o dist.zip -d .veracode
+          JAR=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+          if [ -z "$JAR" ]; then
             echo "::error::No se encontro VeracodeJavaAPI.jar"
             exit 1
           fi
-          cp "$JAR_PATH" vosp-api-wrapper-java.jar
+          cp "$JAR" VeracodeJavaAPI.jar
 
-      - name: Subir a Veracode Sandbox
+      - name: Subir y Escanear (Politica)
+        env:
+          APP_NAME: ${{ needs.package.outputs.app_name }}
+          SCAN_VERSION: ${{ github.ref_name }}-${{ github.run_number }}-${{ github.run_attempt }}
         run: |
-          echo "Subiendo artefactos a Veracode Sandbox..."
-          java -jar vosp-api-wrapper-java.jar \
-            -vid $VERACODE_API_ID \
-            -vkey $VERACODE_API_KEY \
+          java -jar VeracodeJavaAPI.jar \
+            -vid "$VERACODE_API_ID" \
+            -vkey "$VERACODE_API_KEY" \
             -action UploadAndScan \
-            -appname "${{ needs.package.outputs.app_name }}" \
+            -appname "$APP_NAME" \
             -createprofile true \
             -autoscan true \
-            -sandboxname "github-release" \
-            -createsandbox true \
-            -filepath "verascan" \
-            -version "Release ${{ github.run_number }}"
-
-  # =============================================================================
-  # MAIN: main -> Policy Upload (todos los artefactos)
-  # =============================================================================
-  main-policy-scan:
-    name: Policy Upload (main)
-    needs: package
-    if: github.event_name == 'push' && github.ref_name == 'main'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Descargar Artefactos
-        uses: actions/download-artifact@v4
-        with:
-          name: verascan
-
-      - name: Listar Artefactos para Upload
-        run: |
-          echo "Artefactos para upload:"
-          ls -lh verascan/
-
-      - name: Descargar Veracode Java API Wrapper
-        run: |
-          mkdir -p .veracode
-          VERSION=$(curl -sS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
-          if [ -z "$VERSION" ]; then
-            echo "::error::No se pudo obtener la version del API Wrapper"
-            exit 1
-          fi
-          echo "Descargando version: $VERSION"
-          curl -sSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
-          cd .veracode && unzip -o dist.zip && cd ..
-          JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
-          if [ -z "$JAR_PATH" ]; then
-            echo "::error::No se encontro VeracodeJavaAPI.jar"
-            exit 1
-          fi
-          cp "$JAR_PATH" vosp-api-wrapper-java.jar
-
-      - name: Subir a Plataforma Veracode (Policy)
-        run: |
-          echo "Subiendo artefactos a la Plataforma Veracode..."
-          java -jar vosp-api-wrapper-java.jar \
-            -vid $VERACODE_API_ID \
-            -vkey $VERACODE_API_KEY \
-            -action UploadAndScan \
-            -appname "${{ needs.package.outputs.app_name }}" \
-            -createprofile true \
-            -autoscan true \
-            -filepath "verascan" \
-            -version "main ${{ github.run_number }}"
+            -filepath verascan \
+            -version "$SCAN_VERSION"

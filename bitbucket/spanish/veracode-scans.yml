@@ -1,310 +1,206 @@
 # =============================================================================
-# Pipeline de Seguridad Veracode para Bitbucket (Soporte Multi-Artefacto)
-# =============================================================================
+# CI - Veracode (Bitbucket Pipelines)
 #
-# Variables de repositorio requeridas (Configuracion > Pipelines > Variables):
-#   - VERACODE_API_ID         (requerida)
-#   - VERACODE_API_KEY        (requerida, marcar como asegurada)
-#   - SRCCLR_API_TOKEN        (opcional, solo si se usa SCA)
-#   - VERACODE_APP_NAME       (opcional, sobreescribe el nombre por defecto)
+# Renombra este archivo a bitbucket-pipelines.yml en la raiz de tu repositorio.
 #
-# Estrategia de escaneo detectada por rama / evento:
-#   feature/*       -> Pipeline Scan (sin gate)                     por artefacto
-#   pull-requests   -> Pipeline Scan (gate Very High / High)         por artefacto
-#   release/*       -> Sandbox Scan (SAST completo en sandbox)       todos los artefactos
-#   main            -> Policy Scan (certificacion de produccion)     todos los artefactos
+# Variables del repositorio (Repository settings > Pipelines > Repository variables):
+#   VERACODE_API_ID     Veracode API ID          (Secured)
+#   VERACODE_API_KEY    Veracode API Key         (Secured)
+# Opcionales:
+#   SRCCLR_API_TOKEN    Token de SCA basado en agente (Secured)
+#   VERACODE_APP_NAME   Nombre del perfil de aplicacion (por defecto: {workspace}/{repo})
 #
-# Formato por defecto del nombre de app: {workspace}/{repo} via $BITBUCKET_REPO_FULL_NAME
+# Seleccion de escaneo (condiciones de inicio nativas, "triggers:" al final):
+#   push a la rama por defecto   -> veracode-policy   (Policy Scan)
+#   push a feature/**            -> veracode-feature  (Pipeline Scan, falla con cualquier hallazgo)
+#   PR a la rama por defecto     -> veracode-pr       (Pipeline Scan, gate de politica)
+#   todos los anteriores         -> SCA basado en agente (no bloqueante)
+#
+# Bitbucket no expone la rama por defecto como variable. Si la tuya no es
+# "main", actualiza las dos condiciones en "triggers:".
 # =============================================================================
 
-image: maven:3.9.6-eclipse-temurin-17
+image: maven:3.9-eclipse-temurin-17
 
 definitions:
   steps:
     # -------------------------------------------------------------------------
-    # PACKAGE
-    # Construir, autoempaquetar, listar y validar artefactos
+    # PACKAGE: Autopackager de Veracode CLI
     # -------------------------------------------------------------------------
     - step: &package
         name: Empaquetar Artefactos
         script:
-          - set -e
-          # Resolver nombre del perfil de aplicacion en Veracode
-          - |
-            if [ -n "$VERACODE_APP_NAME" ]; then
-              APP_NAME="$VERACODE_APP_NAME"
-            else
-              APP_NAME="$BITBUCKET_REPO_FULL_NAME"
-            fi
-            echo "Perfil de Aplicacion Veracode: $APP_NAME"
-            echo "$APP_NAME" > app_name.txt
-          # Instalar Veracode CLI
-          - echo "Instalando Veracode CLI..."
-          - curl -fsS -O https://tools.veracode.com/veracode-cli/install
-          - chmod +x ./install
-          - ./install
-          - chmod +x veracode
+          - apt-get update -qq && apt-get install -y -qq unzip >/dev/null
+          - curl -fsS https://tools.veracode.com/veracode-cli/install | sh
           - ./veracode version
-          # Ejecutar autoempaquetador
-          - echo "Ejecutando autoempaquetador de Veracode..."
           - mkdir -p verascan
           - ./veracode package --source . --output verascan --trust
-          - echo "Artefactos empaquetados:"
           - ls -lhR verascan
-          # Listar y validar artefactos
           - find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
           - |
             if [ ! -s artifact_list.txt ]; then
               echo "ERROR: No se encontraron artefactos empaquetados"
-              ls -lR verascan
               exit 1
             fi
-          - echo "Artefactos encontrados:"
-          - cat artifact_list.txt
-          - ARTIFACT_COUNT=$(wc -l < artifact_list.txt)
-          - echo "Total de artefactos - $ARTIFACT_COUNT"
+            echo "Artefactos encontrados ($(wc -l < artifact_list.txt)):"
+            cat artifact_list.txt
         artifacts:
-          - veracode
           - verascan/**
           - artifact_list.txt
-          - app_name.txt
 
     # -------------------------------------------------------------------------
-    # SCA
-    # Analisis de Composicion de Software basado en agente (todas las ramas)
+    # SCA: SCA basado en agente (no bloqueante)
     # -------------------------------------------------------------------------
-    - step: &sca-scan
-        name: SCA basado en Agente
+    - step: &sca
+        name: SCA Basado en Agente
         script:
-          - set -e
-          - echo "Ejecutando Veracode Agent-Based SCA..."
-          - curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
+          - curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
 
     # -------------------------------------------------------------------------
-    # PIPELINE SCAN EN FEATURE
-    # feature/*  -> Pipeline Scan, sin gate, por artefacto
+    # PIPELINE SCAN (feature): sin criterio de fallo, cada hallazgo cuenta
     # -------------------------------------------------------------------------
-    - step: &pipeline-scan
+    - step: &pipeline-scan-feature
         name: Pipeline Scan (feature)
         script:
-          - set -e
-          - echo "Instalando prerequisitos..."
-          - apt-get update && apt-get install -y unzip default-jre
-          - echo "Descargando Veracode Pipeline Scanner..."
-          - curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
-          - unzip -o pipeline-scan-LATEST.zip
-          - |
-            if [ ! -f "pipeline-scan.jar" ]; then
-              echo "ERROR: pipeline-scan.jar no encontrado"
-              exit 1
-            fi
-          - mkdir -p scan_results
-          - SCAN_COUNT=0
-          # Iterar y escanear cada artefacto individualmente
-          - |
-            while IFS= read -r artifact; do
-              SCAN_COUNT=$((SCAN_COUNT + 1))
-              ARTIFACT_NAME=$(basename "$artifact")
-              echo ""
-              echo "=========================================="
-              echo "Escaneando [$SCAN_COUNT] - $ARTIFACT_NAME"
-              echo "=========================================="
-              java -jar pipeline-scan.jar \
-                -f "$artifact" \
-                -vid "$VERACODE_API_ID" \
-                -vkey "$VERACODE_API_KEY" \
-                --fail_on_severity "" \
-                --issue_details true \
-                -jo true \
-                || echo "Pipeline scan completado con findings para $ARTIFACT_NAME"
-              if [ -f "results.json" ]; then
-                mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
-                echo "Resultados guardados - scan_results/${ARTIFACT_NAME}_results.json"
-              else
-                echo "ADVERTENCIA - No se produjo results.json para $ARTIFACT_NAME"
-              fi
-            done < artifact_list.txt
-          - echo "Pipeline Scan completado para $SCAN_COUNT artefactos"
-        artifacts:
-          - scan_results/**
+          - GATE_POLICY=""
+          - echo "Gate - falla con cualquier hallazgo"
+          - &pipeline_scan_loop |
+            apt-get update -qq && apt-get install -y -qq unzip >/dev/null
+            curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+            unzip -o pipeline-scan-LATEST.zip pipeline-scan.jar
 
-    # -------------------------------------------------------------------------
-    # PIPELINE SCAN EN PR (CON GATE)
-    # pull-requests -> Pipeline Scan con gate de politica (Very High / High)
-    # -------------------------------------------------------------------------
-    - step: &pipeline-scan-gate
-        name: Pipeline Scan (Gate de PR)
-        script:
-          - set -e
-          - echo "Instalando prerequisitos..."
-          - apt-get update && apt-get install -y unzip default-jre
-          - echo "Descargando Veracode Pipeline Scanner..."
-          - curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
-          - unzip -o pipeline-scan-LATEST.zip
-          - |
-            if [ ! -f "pipeline-scan.jar" ]; then
-              echo "ERROR: pipeline-scan.jar no encontrado"
-              exit 1
-            fi
-          - mkdir -p scan_results
-          - FAILED=0
-          - SCAN_COUNT=0
-          - FAILED_ARTIFACTS=""
-          # Iterar, escanear cada artefacto, rastrear fallos entre artefactos
-          - |
+            mkdir -p scan_results
+            FAILED=0
+            FAILED_ARTIFACTS=""
+
             while IFS= read -r artifact; do
-              SCAN_COUNT=$((SCAN_COUNT + 1))
-              ARTIFACT_NAME=$(basename "$artifact")
-              echo ""
+              NAME=$(basename "$artifact")
               echo "=========================================="
-              echo "Escaneando [$SCAN_COUNT] - $ARTIFACT_NAME"
+              echo "Escaneando: $NAME"
               echo "=========================================="
-              if ! java -jar pipeline-scan.jar \
-                -f "$artifact" \
-                -vid "$VERACODE_API_ID" \
-                -vkey "$VERACODE_API_KEY" \
-                --fail_on_severity "Very High, High" \
-                --issue_details true \
-                --policy_name "Veracode Recommended Very High" \
-                -jo true; then
-                FAILED=1
-                FAILED_ARTIFACTS="$FAILED_ARTIFACTS $ARTIFACT_NAME"
-                echo "ADVERTENCIA - Gate de politica fallo para $ARTIFACT_NAME"
-              fi
-              if [ -f "results.json" ]; then
-                mv results.json "scan_results/${ARTIFACT_NAME}_results.json"
-                echo "Resultados guardados - scan_results/${ARTIFACT_NAME}_results.json"
+
+              set +e
+              if [ -n "$GATE_POLICY" ]; then
+                java -jar pipeline-scan.jar -f "$artifact" \
+                  -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
+                  --issue_details true --policy_name "$GATE_POLICY"
               else
-                echo "ADVERTENCIA - No se produjo results.json para $ARTIFACT_NAME"
+                java -jar pipeline-scan.jar -f "$artifact" \
+                  -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
+                  --issue_details true
+              fi
+              RC=$?
+              set -e
+
+              # 0 = aprobado, 1-200 = cantidad de hallazgos, 253-255 = error o timeout
+              if [ "$RC" -ge 253 ]; then
+                echo "ERROR: Error de escaneo en $NAME (salida $RC)"
+                FAILED=1; FAILED_ARTIFACTS="$FAILED_ARTIFACTS $NAME"
+              elif [ "$RC" -ne 0 ]; then
+                echo "ERROR: $RC hallazgo(s) fallaron el gate en $NAME"
+                FAILED=1; FAILED_ARTIFACTS="$FAILED_ARTIFACTS $NAME"
+              fi
+
+              if [ -f results.json ]; then
+                mv results.json "scan_results/${NAME}_results.json"
               fi
             done < artifact_list.txt
-          - echo "Pipeline Scan completado para $SCAN_COUNT artefactos"
-          - |
-            if [ $FAILED -eq 1 ]; then
-              echo "ERROR - Gate de politica fallo para -$FAILED_ARTIFACTS"
+
+            if [ "$FAILED" -eq 1 ]; then
+              echo "ERROR: Pipeline Scan fallo para:$FAILED_ARTIFACTS"
               exit 1
             fi
         artifacts:
           - scan_results/**
 
     # -------------------------------------------------------------------------
-    # SANDBOX SCAN
-    # release/* -> Subir todos los artefactos a un Sandbox de Veracode
+    # PIPELINE SCAN (PR): evalua los hallazgos contra una politica de Veracode
     # -------------------------------------------------------------------------
-    - step: &sandbox-scan
-        name: Sandbox Scan (Release)
+    - step: &pipeline-scan-pr
+        name: Pipeline Scan (gate PR)
         script:
-          - set -e
-          - echo "Instalando prerequisitos..."
-          - apt-get update && apt-get install -y unzip
-          - echo "Descargando Veracode Java API Wrapper..."
-          - mkdir -p .veracode
-          - VERSION=$(curl -fsS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
-          - |
-            if [ -z "$VERSION" ]; then
-              echo "ERROR: Fallo al obtener la version del API Wrapper"
-              exit 1
-            fi
-          - echo "Descargando version $VERSION"
-          - curl -fsSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
-          - cd .veracode && unzip -o dist.zip && cd ..
-          - JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
-          - |
-            if [ -z "$JAR_PATH" ]; then
-              echo "ERROR: VeracodeJavaAPI.jar no encontrado"
-              exit 1
-            fi
-          - cp "$JAR_PATH" vosp-api-wrapper-java.jar
-          - APP_NAME=$(cat app_name.txt)
-          - echo "Subiendo al Sandbox de Veracode..."
-          - echo "Aplicacion - $APP_NAME"
-          - echo "Artefactos a subir:"
-          - ls -lh verascan/
-          # -filepath acepta un directorio; el wrapper sube multiples archivos
-          - |
-            java -jar vosp-api-wrapper-java.jar \
-              -vid "$VERACODE_API_ID" \
-              -vkey "$VERACODE_API_KEY" \
-              -action UploadAndScan \
-              -appname "$APP_NAME" \
-              -createprofile true \
-              -autoscan true \
-              -sandboxname "bitbucket-release" \
-              -createsandbox true \
-              -filepath "verascan" \
-              -version "Release $BITBUCKET_BUILD_NUMBER"
+          - GATE_POLICY="Veracode Recommended Very High"
+          - echo "Gate - politica $GATE_POLICY"
+          - *pipeline_scan_loop
+        artifacts:
+          - scan_results/**
 
     # -------------------------------------------------------------------------
-    # POLICY SCAN
-    # main -> Subir todos los artefactos para evaluacion de politica
+    # POLICY SCAN: push a la rama por defecto
     # -------------------------------------------------------------------------
     - step: &policy-scan
-        name: Policy Scan (Produccion)
+        name: Policy Scan
         script:
-          - set -e
-          - echo "Instalando prerequisitos..."
-          - apt-get update && apt-get install -y unzip
-          - echo "Descargando Veracode Java API Wrapper..."
-          - mkdir -p .veracode
-          - VERSION=$(curl -fsS https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/maven-metadata.xml | grep -oPm1 "(?<=<latest>)[^<]+")
+          - apt-get update -qq && apt-get install -y -qq unzip >/dev/null
+          - BASE=https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java
+          - curl -fsS "$BASE/maven-metadata.xml" -o maven-metadata.xml
+          - VERSION=$(grep -oPm1 "(?<=<latest>)[^<]+" maven-metadata.xml)
           - |
             if [ -z "$VERSION" ]; then
-              echo "ERROR: Fallo al obtener la version del API Wrapper"
+              echo "ERROR: No se pudo resolver la version del API Wrapper"
               exit 1
             fi
-          - echo "Descargando version $VERSION"
-          - curl -fsSL "https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o .veracode/dist.zip
-          - cd .veracode && unzip -o dist.zip && cd ..
-          - JAR_PATH=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+            echo "Version del API Wrapper: $VERSION"
+          - curl -fsSL "$BASE/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o dist.zip
+          - unzip -o dist.zip -d .veracode
+          - JAR=$(find .veracode -type f -name 'VeracodeJavaAPI*.jar' | head -n1)
           - |
-            if [ -z "$JAR_PATH" ]; then
-              echo "ERROR: VeracodeJavaAPI.jar no encontrado"
+            if [ -z "$JAR" ]; then
+              echo "ERROR: No se encontro VeracodeJavaAPI.jar"
               exit 1
             fi
-          - cp "$JAR_PATH" vosp-api-wrapper-java.jar
-          - APP_NAME=$(cat app_name.txt)
-          - echo "Subiendo a la Plataforma Veracode..."
-          - echo "Aplicacion - $APP_NAME"
-          - echo "Artefactos a subir:"
-          - ls -lh verascan/
+            cp "$JAR" VeracodeJavaAPI.jar
+          - APP_NAME="${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}"
+          - echo "Perfil de Aplicacion Veracode - $APP_NAME"
           - |
-            java -jar vosp-api-wrapper-java.jar \
+            java -jar VeracodeJavaAPI.jar \
               -vid "$VERACODE_API_ID" \
               -vkey "$VERACODE_API_KEY" \
               -action UploadAndScan \
               -appname "$APP_NAME" \
               -createprofile true \
               -autoscan true \
-              -filepath "verascan" \
-              -version "main $BITBUCKET_BUILD_NUMBER"
+              -filepath verascan \
+              -version "${BITBUCKET_BRANCH}-${BITBUCKET_BUILD_NUMBER}-$(date +%Y%m%d%H%M%S)"
 
 # =============================================================================
-# TRIGGERS DEL PIPELINE
-# Mapeo de ramas y eventos
+# PIPELINES (custom, iniciados por los triggers de abajo)
 # =============================================================================
 pipelines:
-  branches:
-    main:
+  custom:
+    veracode-policy:
       - step: *package
       - parallel:
-          - step: *sca-scan
-          - step: *policy-scan
+          steps:
+            - step: *sca
+            - step: *policy-scan
 
-    release/*:
+    veracode-feature:
       - step: *package
       - parallel:
-          - step: *sca-scan
-          - step: *sandbox-scan
+          steps:
+            - step: *sca
+            - step: *pipeline-scan-feature
 
-    feature/*:
+    veracode-pr:
       - step: *package
       - parallel:
-          - step: *sca-scan
-          - step: *pipeline-scan
+          steps:
+            - step: *sca
+            - step: *pipeline-scan-pr
 
-  pull-requests:
-    '**':
-      - step: *package
-      - parallel:
-          - step: *sca-scan
-          - step: *pipeline-scan-gate
+# =============================================================================
+# TRIGGERS (condiciones de inicio)
+# =============================================================================
+triggers:
+  repository-push:
+    - condition: BITBUCKET_BRANCH == "main"
+      pipelines:
+        - veracode-policy
+    - condition: glob(BITBUCKET_BRANCH, "feature/**")
+      pipelines:
+        - veracode-feature
+  pullrequest-push:
+    - condition: BITBUCKET_PR_DESTINATION_BRANCH == "main"
+      pipelines:
+        - veracode-pr

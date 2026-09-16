@@ -1,0 +1,197 @@
+# =============================================================================
+# CI - Veracode (AWS CodeBuild)
+#
+# Credenciales: secreto de AWS Secrets Manager "veracode/credentials" (JSON):
+#   { "VERACODE_API_ID": "...", "VERACODE_API_KEY": "...", "SRCCLR_API_TOKEN": "..." }
+# El rol de servicio de CodeBuild necesita secretsmanager:GetSecretValue sobre el.
+#
+# Variables de entorno opcionales del proyecto:
+#   VERACODE_APP_NAME   Nombre del perfil de aplicacion (por defecto: nombre del proyecto CodeBuild)
+#   DEFAULT_BRANCH      Rama por defecto         (por defecto: main)
+#   BRANCH_NAME         Rama cuando lo inicia CodePipeline (sin variables de webhook)
+#   SCAN_MODE           Forzar un modo: policy | feature | pr | skip
+#
+# Seleccion de escaneo (se resuelve al inicio de la fase build):
+#   push a la rama por defecto (webhook PUSH)        -> Policy Scan
+#   push a feature/*           (webhook PUSH)        -> Pipeline Scan (falla con cualquier hallazgo)
+#   PR a la rama por defecto   (webhook PULL_REQUEST_*) -> Pipeline Scan (gate de politica)
+#   cualquier otro caso                              -> skip
+#   SCA corre siempre que corre un escaneo (no bloqueante)
+#
+# Filter groups del webhook: ver veracode-strategy.md.
+# =============================================================================
+
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    PR_GATE_POLICY: "Veracode Recommended Very High"
+  secrets-manager:
+    VERACODE_API_ID: "veracode/credentials:VERACODE_API_ID"
+    VERACODE_API_KEY: "veracode/credentials:VERACODE_API_KEY"
+    # Descomenta cuando el secreto contenga un token de agente SCA
+    # SRCCLR_API_TOKEN: "veracode/credentials:SRCCLR_API_TOKEN"
+
+phases:
+  install:
+    runtime-versions:
+      java: corretto17
+    commands:
+      - command -v unzip >/dev/null || (apt-get update -qq && apt-get install -y -qq unzip) || yum install -y -q unzip
+
+  build:
+    commands:
+      # -----------------------------------------------------------------------
+      # RESOLVER MODO DE ESCANEO (mismo shell que los comandos siguientes)
+      # -----------------------------------------------------------------------
+      - |
+        DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+        TRIGGER="${CODEBUILD_WEBHOOK_TRIGGER:-}"
+        if [ -z "${SCAN_MODE:-}" ]; then
+          case "$TRIGGER" in
+            pr/*)
+              if [ "${CODEBUILD_WEBHOOK_BASE_REF:-}" = "refs/heads/$DEFAULT_BRANCH" ]; then
+                SCAN_MODE=pr
+              else
+                SCAN_MODE=skip
+              fi
+              ;;
+            *)
+              BRANCH="${TRIGGER#branch/}"
+              BRANCH="${BRANCH:-${BRANCH_NAME:-}}"
+              case "$BRANCH" in
+                "$DEFAULT_BRANCH") SCAN_MODE=policy ;;
+                feature/*)         SCAN_MODE=feature ;;
+                *)                 SCAN_MODE=skip ;;
+              esac
+              ;;
+          esac
+        fi
+        echo "Trigger: ${TRIGGER:-ninguno}  Rama: ${BRANCH:-n/a}  Modo de escaneo: $SCAN_MODE"
+      - |
+        if [ "$SCAN_MODE" != "skip" ] && { [ -z "$VERACODE_API_ID" ] || [ -z "$VERACODE_API_KEY" ]; }; then
+          echo "ERROR: VERACODE_API_ID y VERACODE_API_KEY son requeridos"
+          exit 1
+        fi
+
+      # -----------------------------------------------------------------------
+      # PACKAGE: Autopackager de Veracode CLI
+      # -----------------------------------------------------------------------
+      - |
+        if [ "$SCAN_MODE" != "skip" ]; then
+          curl -fsS https://tools.veracode.com/veracode-cli/install | sh
+          ./veracode version
+          mkdir -p verascan
+          ./veracode package --source . --output verascan --trust
+          ls -lhR verascan
+          find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
+          if [ ! -s artifact_list.txt ]; then
+            echo "ERROR: No se encontraron artefactos empaquetados"
+            exit 1
+          fi
+          echo "Artefactos encontrados ($(wc -l < artifact_list.txt)):"
+          cat artifact_list.txt
+        else
+          echo "Sin escaneo Veracode para este disparador"
+        fi
+
+      # -----------------------------------------------------------------------
+      # SCA: SCA basado en agente (no bloqueante)
+      # -----------------------------------------------------------------------
+      - |
+        if [ "$SCAN_MODE" != "skip" ]; then
+          curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
+        fi
+
+      # -----------------------------------------------------------------------
+      # PIPELINE SCAN: feature (falla con cualquier hallazgo) y pr (gate de politica)
+      # -----------------------------------------------------------------------
+      - |
+        if [ "$SCAN_MODE" = "feature" ] || [ "$SCAN_MODE" = "pr" ]; then
+          curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
+          unzip -o pipeline-scan-LATEST.zip pipeline-scan.jar
+
+          GATE_ARGS=()
+          if [ "$SCAN_MODE" = "pr" ]; then
+            GATE_ARGS=(--policy_name "$PR_GATE_POLICY")
+            echo "Gate: politica '$PR_GATE_POLICY'"
+          else
+            echo "Gate: falla con cualquier hallazgo"
+          fi
+
+          mkdir -p scan_results
+          FAILED=0
+          FAILED_ARTIFACTS=""
+
+          while IFS= read -r artifact; do
+            NAME=$(basename "$artifact")
+            echo "=========================================="
+            echo "Escaneando: $NAME"
+            echo "=========================================="
+
+            set +e
+            java -jar pipeline-scan.jar \
+              -f "$artifact" \
+              -vid "$VERACODE_API_ID" \
+              -vkey "$VERACODE_API_KEY" \
+              --issue_details true \
+              "${GATE_ARGS[@]}"
+            RC=$?
+            set -e
+
+            # 0 = aprobado, 1-200 = cantidad de hallazgos, 253-255 = error o timeout
+            if [ "$RC" -ge 253 ]; then
+              echo "ERROR: Error de escaneo en $NAME (salida $RC)"
+              FAILED=1; FAILED_ARTIFACTS="$FAILED_ARTIFACTS $NAME"
+            elif [ "$RC" -ne 0 ]; then
+              echo "ERROR: $RC hallazgo(s) fallaron el gate en $NAME"
+              FAILED=1; FAILED_ARTIFACTS="$FAILED_ARTIFACTS $NAME"
+            fi
+
+            if [ -f results.json ]; then
+              mv results.json "scan_results/${NAME}_results.json"
+            fi
+          done < artifact_list.txt
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "ERROR: Pipeline Scan fallo para:$FAILED_ARTIFACTS"
+            exit 1
+          fi
+        fi
+
+      # -----------------------------------------------------------------------
+      # POLICY SCAN: push a la rama por defecto
+      # -----------------------------------------------------------------------
+      - |
+        if [ "$SCAN_MODE" = "policy" ]; then
+          BASE=https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java
+          curl -fsS "$BASE/maven-metadata.xml" -o maven-metadata.xml
+          VERSION=$(grep -oPm1 "(?<=<latest>)[^<]+" maven-metadata.xml)
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: No se pudo resolver la version del API Wrapper"
+            exit 1
+          fi
+          echo "Version del API Wrapper: $VERSION"
+          curl -fsSL "$BASE/${VERSION}/vosp-api-wrappers-java-${VERSION}-dist.zip" -o dist.zip
+          unzip -o dist.zip -d .veracode
+          JAR=$(find .veracode -type f -name "VeracodeJavaAPI*.jar" | head -n1)
+          if [ -z "$JAR" ]; then
+            echo "ERROR: No se encontro VeracodeJavaAPI.jar"
+            exit 1
+          fi
+
+          # CODEBUILD_BUILD_ID es "<nombre-proyecto>:<uuid>"
+          APP_NAME="${VERACODE_APP_NAME:-${CODEBUILD_BUILD_ID%%:*}}"
+          echo "Perfil de Aplicacion Veracode: $APP_NAME"
+
+          java -jar "$JAR" \
+            -vid "$VERACODE_API_ID" \
+            -vkey "$VERACODE_API_KEY" \
+            -action UploadAndScan \
+            -appname "$APP_NAME" \
+            -createprofile true \
+            -autoscan true \
+            -filepath verascan \
+            -version "${DEFAULT_BRANCH}-${CODEBUILD_BUILD_NUMBER}"
+        fi
