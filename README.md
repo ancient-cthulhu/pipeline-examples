@@ -25,14 +25,14 @@ Common flow on every platform:
 
 ## Available Implementations
 
-| Platform | Folder | English | Spanish | Updated to new strategy |
-|----------|--------|---------|---------|-------------------------|
-| GitHub Actions | [`github-actions/`](./github-actions) | Yes | Yes | Yes |
-| GitLab CI/CD | [`gitlab/`](./gitlab) | Yes | Yes | Yes |
-| Bitbucket Pipelines | [`bitbucket/`](./bitbucket) | Yes | Yes | Yes |
-| Azure DevOps | [`ado/`](./ado) | Yes | Yes | Yes |
-| AWS CodeBuild | [`aws/`](./aws) | Yes | Yes | Yes |
-| Jenkins (Linux, Windows) | [`jenkins/`](./jenkins) | Yes | Yes | Yes |
+| Platform | Folder | English | Spanish |
+|----------|--------|---------|---------|
+| GitHub Actions | [`github-actions/`](./github-actions) | Yes | Yes |
+| GitLab CI/CD | [`gitlab/`](./gitlab) | Yes | Yes |
+| Bitbucket Pipelines | [`bitbucket/`](./bitbucket) | Yes | Yes |
+| Azure DevOps | [`ado/`](./ado) | Yes | Yes |
+| AWS CodeBuild | [`aws/`](./aws) | Yes | Yes |
+| Jenkins (Linux, Windows) | [`jenkins/`](./jenkins) | Yes | Yes |
 
 Each language folder contains the pipeline file and a `veracode-strategy.md` with setup, job details, customization, and troubleshooting.
 
