@@ -1,66 +1,56 @@
 # Veracode CI/CD Pipeline Examples
 
-Repository that provides example CI/CD pipeline configurations for Veracode integration. Use as reference implementations and adapt to your needs.
+Reference CI/CD pipelines for Veracode Static Analysis and SCA. Every platform implements the same scan strategy in its native syntax. Adapt branch names, policies, and build steps to your project.
 
 ---
 
-## What's Included
+## Scan Strategy
 
-Each implementation provides:
+| Trigger | Scan | Gate | Purpose |
+|---------|------|------|---------|
+| Push to `feature/**` | Pipeline Scan | Fails on any flaw | Fast developer feedback |
+| Pull/Merge Request to default branch | Pipeline Scan | `Veracode Recommended Very High` policy | Prove the change is safe to merge |
+| Push to default branch | Policy Scan (Upload and Scan) | Platform policy | Compliance record in the Veracode Platform |
+| All of the above | Agent-Based SCA | Non-blocking | Third-party dependency analysis |
 
-- **Pipeline Configuration**: Complete CI/CD pipeline file ready to use
-- **Security Strategy Guide**: When and why to use each Veracode scan type
-- **Multi-technology Support**: Java, .NET, Node.js, Python, Go, PHP, Ruby, Scala, and more
-- **Bilingual Documentation**: Available in English and Spanish
+Pipeline Scan exit codes: `0` no flaws, `1-200` flaws matching the criteria, `253-255` timeout or error ([status codes](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)).
+
+Common flow on every platform:
+
+1. **Package**: Veracode CLI autopackager (`veracode package --trust`) builds scannable artifacts into `verascan/`.
+2. **Pipeline Scan**: each artifact scanned separately, results kept, job fails if any artifact fails.
+3. **Policy Scan**: Java API Wrapper `UploadAndScan` uploads the whole `verascan/` folder as one build.
 
 ---
 
 ## Available Implementations
 
-| Platform | Status | English | Spanish |
-|----------|--------|---------|---------|
-| Azure DevOps | Available | Yes | Yes |
-| Bitbucket Pipelines | Available | Yes | Yes |
-| GitHub Actions | Available | Yes | Yes |
-| GitLab CI/CD | Available | Yes | Yes |
-| AWS CodeBuild | 1/2 Available | - | Yes |
-| Jenkins | Available | Yes | Yes |
+| Platform | Folder | English | Spanish | Updated to new strategy |
+|----------|--------|---------|---------|-------------------------|
+| GitHub Actions | [`github-actions/`](./github-actions) | Yes | Yes | Yes |
+| GitLab CI/CD | [`gitlab/`](./gitlab) | Yes | Yes | Yes |
+| Bitbucket Pipelines | [`bitbucket/`](./bitbucket) | Yes | Yes | Yes |
+| Azure DevOps | [`ado/`](./ado) | Yes | Yes | Yes |
+| AWS CodeBuild | [`aws/`](./aws) | Yes | Yes | Yes |
+| Jenkins (Linux, Windows) | [`jenkins/`](./jenkins) | Yes | Yes | Yes |
 
----
-
-## Veracode Scan Strategy
-
-| Branch Type | Scan Type | Duration | Purpose |
-|-------------|-----------|----------|---------|
-| `feature/*` | Pipeline Scan | 3-10 min | Fast developer feedback |
-| Pull Requests / Merge Requests | Pipeline Scan + Gate | 3-10 min | Block vulnerable code |
-| `release/*` | Sandbox Scan | 30-90 min | Pre-production validation |
-| `main` | Policy Scan | 45-120 min | Production certification |
-| All | SCA | Varies | Third-party dependency analysis |
-
-The same strategy applies across all supported platforms. Branch and trigger conventions are translated to each platform's native syntax (for example, `pull_request` in GitHub Actions, `merge_request_event` in GitLab CI, `pull-requests` in Bitbucket Pipelines).
+Each language folder contains the pipeline file and a `veracode-strategy.md` with setup, job details, customization, and troubleshooting.
 
 ---
 
 ## Prerequisites
 
-- Veracode account with API credentials ([Get them here](https://docs.veracode.com/r/t_create_api_creds))
-- CI/CD platform (Azure DevOps, Bitbucket, GitHub Actions, GitLab, etc.)
-- Supported application (Java, .NET, Node.js, Python, Go, etc.)
+- Veracode API credentials ([create them](https://docs.veracode.com/r/t_create_api_creds))
+- SCA agent token for dependency scanning ([create an agent](https://docs.veracode.com/r/t_sc_cli_agent))
+- Java 8+ and `curl`/`unzip` on the runner (Pipeline Scan and API Wrapper are Java)
+- A project type supported by [autopackaging](https://docs.veracode.com/r/About_auto_packaging), or your own build step
 
 ---
 
-## Documentation
-
-Each folder contains:
-
-- Pipeline configuration file
-- `veracode-strategy.md`: Detailed explanation of scan strategy and Veracode products used
-
-**Official Veracode Docs**:
+## Official Veracode Docs
 
 - [Veracode CLI](https://docs.veracode.com/r/Install_the_Veracode_CLI)
-- [Pipeline Scan](https://docs.veracode.com/r/Pipeline_Scan)
-- [SCA Agent-Based](https://docs.veracode.com/r/Agent_Based_Scans)
-- [Veracode Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers)
-
+- [veracode package](https://docs.veracode.com/r/veracode_package)
+- [Pipeline Scan parameters](https://docs.veracode.com/r/r_pipeline_scan_commands)
+- [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers)
+- [Agent-Based SCA](https://docs.veracode.com/r/Agent_Based_Scans)

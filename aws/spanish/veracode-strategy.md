@@ -1,244 +1,124 @@
-# Estrategia de Seguridad con Veracode
+# Pipeline de Seguridad Veracode para AWS CodeBuild
 
-Estrategia de seguridad automatizada que integra múltiples productos Veracode en el SDLC, balanceando velocidad de feedback con profundidad de análisis según el contexto de desarrollo.
+Buildspec: [`buildspec.yml`](./buildspec.yml). Colocalo en la raiz de tu repositorio (nombre de buildspec por defecto de CodeBuild).
 
-**Tecnologías Soportadas**: Java (Maven/Gradle/Ant), .NET (Core/Framework), Node.js, Python, Go, PHP, Ruby, Scala, y más.
+**Tecnologias soportadas**: todo lo que soporta el [autopackager de Veracode CLI](https://docs.veracode.com/r/About_auto_packaging). Usa una imagen `aws/codebuild/standard` (Ubuntu) o `amazonlinux` que soporte `java: corretto17`, y agrega los toolchains que necesite tu proyecto.
 
 ---
 
 ## Estrategia de Escaneo
 
-| Contexto | Producto Veracode | Tiempo | Gate | Propósito |
-|----------|-------------------|--------|------|-----------|
-| Feature branches | Pipeline Scan | 3-10 min | No | Feedback rápido para desarrolladores |
-| Pull Requests | Pipeline Scan | 3-10 min | Sí (Very High/High) | Prevenir vulnerabilidades antes de merge |
-| Release branches | Sandbox Scan | 30-90 min | No | Validación pre-producción aislada |
-| Branch main | Policy Scan | 25-60 min | Opcional | Certificación para producción |
+| Disparador | Modo | Producto Veracode | Gate |
+|------------|------|-------------------|------|
+| Push a `feature/*` | `feature` | Pipeline Scan | Falla con cualquier hallazgo |
+| Pull request a la rama por defecto | `pr` | Pipeline Scan | Politica `Veracode Recommended Very High` |
+| Push a la rama por defecto | `policy` | Policy Scan | Politica de la plataforma |
+| Cualquier otro caso | `skip` | ninguno | El build pasa sin escanear |
+| Cualquier modo con escaneo | | SCA basado en agente | No bloqueante |
 
-**Todos los contextos**: SCA Agent-Based (análisis de dependencias)
-
----
-
-## Productos Veracode Utilizados
-
-### 1. Veracode CLI - Autopackager
-
-- Detecta automáticamente el tipo de aplicación y tecnología
-- Compila y empaqueta el código para análisis
-- Genera artefactos listos para escaneo (JAR, WAR, ZIP, DLL, etc.)
-
-**Por qué**:
-- Elimina configuración manual por tecnología
-- Garantiza empaquetado consistente
-
-**Comando**: `veracode package --source . --output verascan --trust`
+Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` sin hallazgos, `1-200` cantidad de hallazgos que cumplen el criterio, `253-255` timeout o error. Cualquier codigo distinto de cero falla el build.
 
 ---
 
-### 2. Pipeline Scan
+## Como se Resuelve el Modo de Escaneo
 
-- Análisis SAST rápido e incremental
-- Detecta vulnerabilidades críticas en minutos
-- Genera reportes JSON con línea de código exacta
+El primer comando de `build` define `SCAN_MODE` a partir de las [variables de webhook de CodeBuild](https://docs.aws.amazon.com/codebuild/latest/userguide/build-env-ref-env-vars.html):
 
-**Por qué en feature branches**:
-- Feedback inmediato durante desarrollo activo
-- No bloquea el flujo de trabajo
-- Permite iteración rápida sobre código seguro
+| Origen | Logica |
+|--------|--------|
+| `SCAN_MODE` ya definido | Se usa tal cual (override manual) |
+| `CODEBUILD_WEBHOOK_TRIGGER=pr/<n>` | `pr` si `CODEBUILD_WEBHOOK_BASE_REF` es `refs/heads/$DEFAULT_BRANCH`, si no `skip` |
+| `CODEBUILD_WEBHOOK_TRIGGER=branch/<nombre>` | `policy` para la rama por defecto, `feature` para `feature/*`, si no `skip` |
+| Sin variables de webhook (CodePipeline, inicio manual) | Misma logica de ramas usando `BRANCH_NAME` |
 
-**Por qué en Pull Requests (con gate)**:
-- Previene vulnerabilidades antes de merge
-- Bloquea código inseguro automáticamente
-- Integra seguridad en code review
+La resolucion del modo corre en la misma fase que los escaneos porque el buildspec `0.2` comparte un shell entre comandos.
 
-**Comando básico**:
-```bash
-java -jar pipeline-scan.jar \
-  -f artefacto.jar \
-  -vid $VERACODE_API_ID \
-  -vkey $VERACODE_API_KEY
+---
+
+## Configuracion
+
+### 1. Credenciales en Secrets Manager
+
+Crea un secreto llamado `veracode/credentials` con pares clave/valor:
+
+```json
+{
+  "VERACODE_API_ID": "...",
+  "VERACODE_API_KEY": "...",
+  "SRCCLR_API_TOKEN": "..."
+}
 ```
 
-**Comando con gate**:
-```bash
-java -jar pipeline-scan.jar \
-  -f artefactos.zip \
-  --fail_on_severity "Very High, High" \
-  --policy "Veracode Recommended Very High"
-```
+Otorga al rol de servicio de CodeBuild `secretsmanager:GetSecretValue` sobre el secreto. El buildspec lo lee con `env.secrets-manager` usando el formato `secret-id:json-key` ([referencia de buildspec](https://docs.aws.amazon.com/codebuild/latest/userguide/build-spec-ref.html)). Descomenta la linea `SRCCLR_API_TOKEN` cuando la clave exista; una clave faltante hace fallar el build al inicio.
+
+Credenciales de API: [Generar credenciales de API](https://docs.veracode.com/r/t_create_api_creds). Token de SCA: [Crear un agente SCA](https://docs.veracode.com/r/t_sc_cli_agent).
+
+### 2. Variables de entorno del proyecto (opcionales)
+
+| Variable | Por defecto | Descripcion |
+|----------|-------------|-------------|
+| `VERACODE_APP_NAME` | Nombre del proyecto CodeBuild | Nombre del perfil de aplicacion |
+| `DEFAULT_BRANCH` | `main` | Rama por defecto |
+| `BRANCH_NAME` | ninguno | Rama cuando CodePipeline inicia el build. Pasa `#{SourceVariables.BranchName}` desde la accion de origen. |
+| `SCAN_MODE` | resuelto | Fuerza `policy`, `feature`, `pr` o `skip` |
+
+### 3. Filter groups del webhook (origenes GitHub, GitHub Enterprise Server, Bitbucket)
+
+Configura **Primary source webhook events** con dos filter groups:
+
+| Grupo | `EVENT` | Filtro adicional |
+|-------|---------|------------------|
+| 1 | `PUSH` | `HEAD_REF` = `^refs/heads/(main\|feature/.*)$` |
+| 2 | `PULL_REQUEST_CREATED, PULL_REQUEST_UPDATED, PULL_REQUEST_REOPENED` | `BASE_REF` = `^refs/heads/main$` |
+
+El buildspec igual valida el disparador, asi que un filtro mas amplio solo cuesta minutos de build, nunca ejecuta el escaneo equivocado.
+
+**CodePipeline**: las variables de webhook no estan disponibles cuando CodePipeline inicia CodeBuild. Define `BRANCH_NAME` en la accion de CodeBuild. CodePipeline no tiene un evento nativo de PR, asi que usa `SCAN_MODE=pr` en un pipeline dedicado si necesitas gate de PR ahi.
 
 ---
 
-### 3. Sandbox Scan
+## Pasos del Build
 
-- Análisis SAST completo en ambiente aislado
-- Comparación con escaneos anteriores
-- Reportes detallados sin afectar la politica perfil de producción
+1. **Resolver modo** y validar credenciales (solo se requieren cuando se ejecutara un escaneo).
+2. **Package**: instala Veracode CLI, ejecuta `veracode package --source . --output verascan --trust`, escribe `artifact_list.txt`, falla si esta vacio.
+3. **SCA**: `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`, errores ignorados con `|| echo`.
+4. **Pipeline Scan** (`feature`/`pr`): cada artefacto se escanea por separado, los fallos se acumulan y el build falla al final. `pr` agrega `--policy_name "$PR_GATE_POLICY"`. Los resultados van a `scan_results/`.
+5. **Policy Scan** (`policy`): ultimo [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers) `UploadAndScan` sobre `verascan/`, version `<rama por defecto>-<CODEBUILD_BUILD_NUMBER>`.
 
-**Por qué en release branches**:
-- Validación exhaustiva pre-producción
-- Testing de fixes sin impactar métricas oficiales
-- Permite experimentación segura con nuevas features
-
-**Uso**:
-```bash
-java -jar vosp-api-wrapper-java.jar \
-  -action UploadAndScan \
-  -sandboxname "release-candidate" \
-  -createsandbox true \
-  -filepath artefacto.zip
-```
+Para conservar los resultados de Pipeline Scan, agrega una seccion `artifacts` para `scan_results/**/*` y configura artefactos del proyecto (S3).
 
 ---
 
-### 4. Policy Scan
+## Personalizacion
 
-- Análisis SAST exhaustivo contra políticas corporativas
-- Genera certificación oficial de seguridad
-- Historial completo para compliance y auditoría
+**Cambiar la politica del gate de PR**: edita `PR_GATE_POLICY` en `env.variables`.
 
-**Por qué en main branch**:
-- Certificación formal para código en producción
-- Cumplimiento de políticas de seguridad organizacionales
-- Trazabilidad completa para regulaciones (SOC2, PCI-DSS, etc.)
+**Relajar el gate de feature**: define `GATE_ARGS=(--fail_on_severity "Very High, High")` en la rama `else`.
 
-**Uso**:
-```bash
-java -jar vosp-api-wrapper-java.jar \
-  -action UploadAndScan \
-  -appname "ProductionApp" \
-  -autoscan true \
-  -filepath artefacto.jar \
-  -version "v1.2.3"
-```
+**Escanear todas las ramas que no son la por defecto**: cambia `feature/*)` por `*)` en el `case` de ramas y amplia el filtro `HEAD_REF`.
+
+**Parameter Store en lugar de Secrets Manager**: reemplaza el bloque por entradas `env.parameter-store` apuntando a parametros SecureString.
 
 ---
 
-### 5. SCA Agent-Based
+## Solucion de Problemas
 
-- Análisis de composición de software (dependencias third-party)
-- Detección de vulnerabilidades conocidas (CVEs)
-- Identificación de librerías desactualizadas o con licencias problemáticas
-
-**Por qué en todos los escaneos**:
-- El 80% de vulnerabilidades están en dependencias
-- Detecta riesgos de supply chain
-- Complementa SAST con análisis de third-party code
-
-**Uso**:
-```bash
-curl -sSL https://download.sourceclear.com/ci.sh | bash -s -- scan --recursive --update-advisor
-```
+| Sintoma | Revisar |
+|---------|---------|
+| El build falla al inicio con un error de Secrets Manager | Nombre del secreto o clave JSON distinta, o falta el permiso `GetSecretValue`. |
+| Siempre `Modo de escaneo: skip` desde CodePipeline | `BRANCH_NAME` no se pasa a la accion de CodeBuild. |
+| Build de PR muestra `skip` | El destino del PR no es `DEFAULT_BRANCH`. |
+| `No se encontraron artefactos empaquetados` | La imagen de build no tiene tu toolchain. |
+| Pipeline Scan sale con `255` | Credenciales invalidas, red bloqueada hacia `api.veracode.com`, o artefacto no soportado. |
+| Pipeline Scan sale con `253` o `254` | Timeout del escaneo. Agrega `--timeout <minutos>` (maximo 60). |
+| `UploadAndScan` rechazado | Puede haber un escaneo previo en curso para el perfil. |
 
 ---
 
-## Flujo de Seguridad
+## Recursos
 
-```
-Commit → Autopackager → SCA + SAST (según branch) → Resultados
-```
-
-**Fase 1: Empaquetado** (Veracode CLI)
-- Detecta tecnología automáticamente
-- Compila y empaqueta código
-
-**Fase 2: Análisis de Composición** (SCA)
-- Escanea dependencias third-party
-- Reporta CVEs conocidos
-
-**Fase 3: Análisis Estático** (SAST)
-- Pipeline Scan: Feedback rápido (dev/PR)
-- Sandbox Scan: Validación completa (release)
-- Policy Scan: Certificación oficial (producción)
-
----
-
-## Criterios de Selección de Scan
-
-**Pipeline Scan cuando**:
-- Necesitas feedback en < 10 minutos
-- Estás en ciclo activo de desarrollo
-- Quieres validar fixes rápidamente
-
-**Sandbox Scan cuando**:
-- Preparas un release candidate
-- Necesitas análisis completo sin afectar métricas
-- Quieres comparar con versiones anteriores
-
-**Policy Scan cuando**:
-- Código va a producción
-- Necesitas certificación oficial
-- Requieres compliance para auditorías
-
-**SCA siempre** porque las dependencias son el vector de ataque más común.
-
----
-
-## Variables de Configuración
-
-El pipeline requiere estas variables de entorno:
-
-| Variable | Propósito | Ejemplo |
-|----------|-----------|---------|
-| `VERACODE_API_ID` | Autenticación API | (desde Veracode Platform) |
-| `VERACODE_API_KEY` | Autenticación API | (desde Veracode Platform) |
-| `APP_NAME` | Nombre en Veracode Platform | "MiAplicacion" |
-| `SANDBOX_NAME` | Nombre del sandbox | "release-candidate" |
-| `SCAN_TYPE` | Forzar tipo específico | "pipeline", "sandbox", "policy" |
-| `BRANCH_NAME` | Detección automática | Inyectado por CI/CD |
-
-**Detección automática**: Si no se especifica `SCAN_TYPE`, el pipeline detecta el tipo de scan por el nombre del branch.
-
----
-
-## Resultados y Reportes
-
-**Pipeline Scan genera**:
-- `results.json`: Todos los hallazgos
-- `filtered_results.json`: Hallazgos según policy
-- Código de salida: 0 (pass) o 1 (fail)
-
-**Policy/Sandbox Scan genera**:
-- Reportes en Veracode Platform
-- PDF descargable
-- Dashboard con métricas y tendencias
-- APIs para integración con SIEM/tickets
-
-**SCA genera**:
-- Listado de dependencias vulnerables
-- Scores de riesgo por librería
-- Recomendaciones de actualización
-- Análisis de licencias
-
----
-
-## Mejores Prácticas
-
-**Shift-Left**:
-- Ejecutar Pipeline Scan en cada commit
-- Habilitar gates en PRs para bloquear vulnerabilidades High/Very High
-- Educar al equipo sobre findings comunes
-
-**Compliance**:
-- Policy Scan obligatorio antes de producción
-- Manténer historial de todos los scans
-- Documentar excepciones y mitigaciones
-
-**Optimización**:
-- Usar Pipeline Scan para iteración rápida
-- Reservar Policy Scan para releases oficiales
-- Cachear dependencias para acelerar builds
-
-**SCA**:
-- Monitorer CVEs nuevos continuamente
-- Actualizar dependencias regularmente
-- Revisar licencias antes de adoptar librerías
-
----
-
-## Soporte
-
-- **Documentación Veracode**: [docs.veracode.com](https://docs.veracode.com)
-- **Veracode CLI**: [https://docs.veracode.com/r/Install_the_Veracode_CLI](https://docs.veracode.com/r/Install_the_Veracode_CLI)
-- **Pipeline Scan**: [https://docs.veracode.com/r/Pipeline_Scan](https://docs.veracode.com/r/Pipeline_Scan)
-- **SCA**: [https://docs.veracode.com/r/Agent_Based_Scans](https://docs.veracode.com/r/Agent_Based_Scans)
+- [Referencia de buildspec de CodeBuild](https://docs.aws.amazon.com/codebuild/latest/userguide/build-spec-ref.html)
+- [Variables de entorno de CodeBuild](https://docs.aws.amazon.com/codebuild/latest/userguide/build-env-ref-env-vars.html)
+- [Parametros de Pipeline Scan](https://docs.veracode.com/r/r_pipeline_scan_commands)
+- [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers)
+- [Script CI de SCA](https://docs.veracode.com/r/c_sc_ci_script)

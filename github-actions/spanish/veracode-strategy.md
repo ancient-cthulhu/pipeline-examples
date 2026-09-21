@@ -1,468 +1,156 @@
 # Pipeline de Seguridad Veracode para GitHub Actions
 
-Estrategia de seguridad automatizada que integra multiples productos Veracode en el SDLC, balanceando velocidad de feedback con profundidad de analisis segun el contexto de desarrollo.
+Archivo de workflow: [`veracode-scans.yml`](./veracode-scans.yml). Copialo a `.github/workflows/` en tu repositorio.
 
-**Tecnologias Soportadas**: Java (Maven/Gradle/Ant), .NET (Core/Framework), Node.js, Python, Go, PHP, Ruby, Scala, y mas.
+**Tecnologias soportadas**: todo lo que soporta el [autopackager de Veracode CLI](https://docs.veracode.com/r/About_auto_packaging) (Java, .NET, JavaScript/TypeScript, Python, Go, PHP, Ruby, Scala, Kotlin y mas).
 
 ---
 
 ## Estrategia de Escaneo
 
-| Contexto | Producto Veracode | Tiempo | Gate | Proposito |
-|----------|-------------------|--------|------|-----------|
-| Feature branches | Pipeline Scan | 3-10 min | No | Feedback rapido para desarrolladores |
-| Pull Requests | Pipeline Scan | 3-10 min | Si (Very High/High) | Prevenir vulnerabilidades antes de merge |
-| Release branches | Sandbox Scan | 30-90 min | No | Validacion pre-produccion aislada |
-| Branch main | Policy Scan | 25-60 min | Opcional | Certificacion para produccion |
+| Disparador | Producto Veracode | Gate | Proposito |
+|------------|-------------------|------|-----------|
+| Push a `feature/**` | Pipeline Scan | Falla con cualquier hallazgo | Feedback al desarrollador en cada push |
+| Pull request a la rama por defecto | Pipeline Scan | Politica `Veracode Recommended Very High` | Demostrar que el PR es seguro para merge |
+| Push a la rama por defecto | Policy Scan | Politica de la plataforma | Registro de cumplimiento del perfil de aplicacion |
+| Todos los anteriores | SCA basado en agente | No bloqueante | Analisis de dependencias de terceros |
 
-**Todos los contextos**: SCA Agent-Based (analisis de dependencias)
+Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` sin hallazgos, `1-200` cantidad de hallazgos que cumplen el criterio, `253-255` timeout o error. El workflow trata cualquier codigo distinto de cero como fallo.
 
 ---
 
 ## Estructura del Workflow
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    on: push / pull_request                       │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  JOB PACKAGE (siempre se ejecuta)                                │
-│  ├─ Checkout de codigo                                           │
-│  ├─ Configurar APP_NAME desde github.repository                  │
-│  ├─ Instalar Veracode CLI                                        │
-│  ├─ Ejecutar autopackager                                        │
-│  ├─ Listar y validar artefactos → artifact_list.txt              │
-│  └─ Subir verascan/ como artefacto del workflow                  │
-│                                                                  │
-│  Outputs: artifact_count, app_name                               │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              │                 │                 │
-              ▼                 ▼                 ▼
-┌───────────────────┐ ┌─────────────────┐ ┌─────────────────────┐
-│  JOB SCA          │ │  JOBS PIPELINE  │ │  JOBS PLATAFORMA    │
-│  (todos branches) │ │  SCAN           │ │                     │
-│                   │ │                 │ │                     │
-│  Analisis de      │ │  feature-*:     │ │  release/*:         │
-│  dependencias     │ │   Sin gate      │ │   Sandbox Scan      │
-│  basado en agente │ │                 │ │                     │
-│                   │ │  PR:            │ │  main:              │
-│                   │ │   Gate politica │ │   Policy Scan       │
-└───────────────────┘ └─────────────────┘ └─────────────────────┘
+```text
+on: push (main, feature/**) | pull_request (a main)
+                    |
+        +-----------+-----------+
+        |                       |
+     package                   sca
+  (CLI autopackager)      (no bloqueante)
+        |
+        +---------------------------+
+        |                           |
+  pipeline-scan                policy-scan
+  push feature/**: cualquier   push rama por defecto:
+  hallazgo falla               UploadAndScan
+  PR: gate de politica
 ```
 
----
-
-## Secrets Requeridos
-
-Configurar en: **Settings > Secrets and variables > Actions**
-
-| Secret | Requerido | Descripcion |
-|--------|-----------|-------------|
-| `VERACODE_API_ID` | Si | ID de API Veracode para autenticacion |
-| `VERACODE_API_KEY` | Si | Key de API Veracode para autenticacion |
-| `SRCCLR_API_TOKEN` | No | Token del agente SCA (solo si usas SCA) |
-| `VERACODE_APP_NAME` | No | Sobreescribir nombre de perfil de app por defecto |
-
-### Como Obtener Credenciales
-
-1. Inicia sesion en [Plataforma Veracode](https://analysiscenter.veracode.com)
-2. Click en tu perfil (esquina superior derecha) > **API Credentials**
-3. Genera o copia tu API ID y Key
-4. Para SCA: **Workspace > Agents > Generate Token**
+| Job | Se ejecuta cuando |
+|-----|-------------------|
+| `package` | Siempre (excepto PRs desde forks) |
+| `sca` | Siempre (excepto PRs desde forks) |
+| `pipeline-scan` | `pull_request`, o `push` a una rama que no es la por defecto |
+| `policy-scan` | `push` a `github.event.repository.default_branch` |
 
 ---
 
-## Descripcion de Jobs
+## Secretos Requeridos
 
-### 1. Job Package
+**Settings > Secrets and variables > Actions**
 
-**Se ejecuta en**: Todos los triggers (push y pull_request)
+| Secreto | Requerido | Descripcion |
+|---------|-----------|-------------|
+| `VERACODE_API_ID` | Si | Veracode API ID |
+| `VERACODE_API_KEY` | Si | Veracode API Key |
+| `SRCCLR_API_TOKEN` | Para SCA | Token de SCA basado en agente |
+| `VERACODE_APP_NAME` | No | Nombre del perfil de aplicacion. Por defecto `github.repository` (`org/repo`) |
 
-**Proposito**: Preparar artefactos para escaneo usando Veracode CLI autopackager
-
-| Paso | Descripcion |
-|------|-------------|
-| Checkout | Clonar codigo del repositorio |
-| Configurar App Name | Construir nombre de perfil desde `github.repository` o usar secret `VERACODE_APP_NAME` |
-| Instalar Veracode CLI | Descargar e instalar CLI desde tools.veracode.com |
-| Ejecutar Autopackager | Ejecutar `veracode package --source . --output verascan --trust` |
-| Listar Artefactos | Encontrar todos los archivos `.war`, `.jar`, `.zip`, crear `artifact_list.txt` |
-| Validar | Fallar si no se encuentran artefactos |
-| Subir | Hacer `verascan/` disponible para jobs posteriores |
-
-**Outputs**:
-- `artifact_count`: Numero de artefactos encontrados
-- `app_name`: Nombre del perfil de aplicacion Veracode
+Credenciales de API: [Generar credenciales de API](https://docs.veracode.com/r/t_create_api_creds). Token de SCA: [Crear un agente SCA](https://docs.veracode.com/r/t_sc_cli_agent).
 
 ---
 
-### 2. Job SCA
+## Detalle de Jobs
 
-**Se ejecuta en**: Todos los triggers (en paralelo con otros jobs)
+### package
 
-**Proposito**: Software Composition Analysis para vulnerabilidades en dependencias third-party
+1. Hace checkout del codigo.
+2. Instala Veracode CLI (`curl -fsS https://tools.veracode.com/veracode-cli/install | sh`).
+3. Ejecuta `veracode package --source . --output verascan --trust`.
+4. Escribe cada `.war`, `.jar`, `.zip` encontrado en `artifact_list.txt` y falla si no hay ninguno.
+5. Sube `verascan/` y `artifact_list.txt` como el artefacto de workflow `verascan`.
 
-| Paso | Descripcion |
-|------|-------------|
-| Checkout | Clonar codigo del repositorio |
-| Ejecutar SCA | Ejecutar escaneo basado en agente con `--recursive --update-advisor` |
+### sca
 
-**Por que siempre ejecutar SCA**: 80% de las vulnerabilidades vienen de dependencias. SCA complementa SAST analizando codigo third-party.
+Ejecuta `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`. Los errores se ignoran con `|| echo` para que SCA nunca bloquee el build. Quita ese sufijo para aplicar la politica de SCA.
 
----
+### pipeline-scan
 
-### 3. Feature Pipeline Scan
+Escanea cada artefacto de `artifact_list.txt` por separado, continua despues de un fallo y al final falla el job si algun artefacto fallo.
 
-**Se ejecuta en**: Push a branches `feature/*`
+| Evento | Argumentos agregados | Resultado |
+|--------|----------------------|-----------|
+| `push` a `feature/**` | ninguno | Cada hallazgo cuenta, cualquier hallazgo falla el job |
+| `pull_request` | `--policy_name "Veracode Recommended Very High"` | Solo los hallazgos que violan la politica fallan el job |
 
-**Proposito**: Feedback rapido durante desarrollo activo (sin gate)
+Los resultados se suben como `pipeline-scan-results` (`<artefacto>_results.json`), incluso si falla.
 
-| Paso | Descripcion |
-|------|-------------|
-| Descargar Artefactos | Obtener `verascan/` del job package |
-| Descargar Scanner | Obtener `pipeline-scan.jar` de downloads.veracode.com |
-| Escanear Cada Artefacto | Iterar `artifact_list.txt`, escanear individualmente |
-| Guardar Resultados | `scan_results/${ARTIFACT_NAME}_results.json` |
-| Subir Resultados | Publicar como artefacto del workflow |
+### policy-scan
 
-**Gate**: Ninguno (`--fail_on_severity ""`)
+Descarga el ultimo [Veracode Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers) desde Maven Central y ejecuta `UploadAndScan` sobre toda la carpeta `verascan/`, asi todos los modulos quedan en un solo build.
 
-**Por que sin gate**: Los desarrolladores necesitan feedback rapido y no bloqueante durante desarrollo activo. Esto permite iteracion rapida sobre codigo seguro.
+| Parametro | Valor |
+|-----------|-------|
+| `-appname` | `VERACODE_APP_NAME` o `org/repo` |
+| `-createprofile` | `true` |
+| `-autoscan` | `true` |
+| `-filepath` | `verascan` |
+| `-version` | `<rama>-<run_number>-<run_attempt>` (unico por reintento) |
 
----
-
-### 4. PR Pipeline Scan
-
-**Se ejecuta en**: Pull requests (excluyendo forks)
-
-**Proposito**: Gate de seguridad para pull requests
-
-| Paso | Descripcion |
-|------|-------------|
-| Descargar Artefactos | Obtener `verascan/` del job package |
-| Descargar Scanner | Obtener `pipeline-scan.jar` |
-| Escanear con Gate | Usar `--policy_name "Veracode Recommended Very High"` |
-| Rastrear Fallos | Recolectar artefactos fallidos, reportar al final |
-| Guardar Resultados | `scan_results/${ARTIFACT_NAME}_results.json` |
-| Codigo de Salida | Distinto de cero si algun artefacto falla la politica |
-
-**Gate**: Falla en hallazgos de severidad Very High y High
-
-**Por que gate en PRs**: Previene que vulnerabilidades entren al codigo principal. Integra seguridad en el code review.
+El job termina cuando la carga es aceptada. Los resultados aparecen en la Plataforma Veracode cuando el escaneo finaliza.
 
 ---
 
-### 5. Release Sandbox Scan
+## Notas de Comportamiento
 
-**Se ejecuta en**: Push a branches `release/*`
-
-**Proposito**: Analisis SAST completo en ambiente sandbox aislado
-
-| Paso | Descripcion |
-|------|-------------|
-| Descargar Artefactos | Obtener `verascan/` del job package |
-| Listar Contenido | Mostrar artefactos siendo subidos |
-| Descargar API Wrapper | Obtener ultimo `vosp-api-wrappers-java` de Maven Central |
-| Subir a Sandbox | `-filepath "verascan"` (upload de carpeta, no necesita zip) |
-
-**Nombre de Sandbox**: `github-release` (configurable)
-
-**Por que sandbox para releases**: Validacion completa sin afectar metricas de produccion. Permite experimentacion con nuevas features de forma segura.
-
----
-
-### 6. Main Policy Scan
-
-**Se ejecuta en**: Push a branch `main`
-
-**Proposito**: Certificacion de produccion para compliance
-
-| Paso | Descripcion |
-|------|-------------|
-| Descargar Artefactos | Obtener `verascan/` del job package |
-| Listar Contenido | Mostrar artefactos siendo subidos |
-| Descargar API Wrapper | Obtener ultima version dinamicamente |
-| Subir a Plataforma | `-filepath "verascan"` para evaluacion de politica |
-
-**Por que policy scan en main**: Certificacion de seguridad oficial para codigo en produccion. Proporciona trazabilidad para regulaciones (SOC2, PCI-DSS, etc.).
-
----
-
-## Nombres de Perfil de Aplicacion
-
-El workflow construye automaticamente el nombre del perfil de aplicacion Veracode:
-
-**Formato por defecto**: `{organizacion}/{repositorio}`
-
-| Repositorio GitHub | Nombre de App Veracode |
-|--------------------|------------------------|
-| `acme-corp/api-service` | `acme-corp/api-service` |
-| `myorg/frontend` | `myorg/frontend` |
-| `company/backend-api` | `company/backend-api` |
-
-**Sobreescribir**: Configura el secret `VERACODE_APP_NAME` para usar un nombre personalizado.
-
----
-
-## Manejo Multi-Artefacto
-
-El workflow maneja repositorios con multiples artefactos desplegables:
-
-### Pipeline Scans (feature/PR)
-Cada artefacto se escanea individualmente:
-```
-verascan/
-  ├── backend-api.jar      → escaneado por separado
-  ├── frontend.zip         → escaneado por separado  
-  └── common-lib.jar       → escaneado por separado
-
-scan_results/
-  ├── backend-api.jar_results.json
-  ├── frontend.zip_results.json
-  └── common-lib.jar_results.json
-```
-
-### Platform Scans (release/main)
-Todos los artefactos subidos juntos via carpeta:
-```
--filepath "verascan"    # API Wrapper maneja upload multi-archivo nativamente
-```
-
-**Nota**: No se crea bundle zip. El Java API Wrapper acepta una ruta de directorio directamente, evitando rechazos de zip bomb.
-
----
-
-## Resultados de Escaneo
-
-### Resultados de Pipeline Scan
-
-Los resultados se guardan por artefacto en `scan_results/`:
-
-```
-scan_results/
-  backend-api.jar_results.json
-  frontend.zip_results.json
-  common-lib.jar_results.json
-```
-
-**Descargar**: Workflow run > seccion Artifacts > `pipeline-scan-results` o `pipeline-scan-gate-results`
-
-**Estructura JSON**:
-```json
-{
-  "findings": [...],
-  "pipeline_scan": {...},
-  "scan_status": "SUCCESS"
-}
-```
-
-### Resultados de Platform Scan (Sandbox/Policy)
-
-Consultar en Plataforma Veracode:
-1. Iniciar sesion en [analysiscenter.veracode.com](https://analysiscenter.veracode.com)
-2. Navegar a tu perfil de aplicacion
-3. Ver hallazgos, estado de compliance y tendencias
+- **Rama por defecto**: los disparadores en `on:` no aceptan expresiones, por eso `main` esta fijo ahi. Las condiciones de los jobs usan `github.event.repository.default_branch`. Si tu rama por defecto es `master` o `develop`, cambia ambas listas `branches:`.
+- **Ejecuciones duplicadas**: un push a `feature/x` con un PR abierto dispara `push` y `pull_request`. Es esperado: la ejecucion de push da feedback completo, la del PR es el gate de merge. Marca solo el check del PR como requerido en la proteccion de ramas.
+- **Concurrencia**: las ejecuciones nuevas cancelan las anteriores en la misma ref, excepto en la rama por defecto, donde las cargas de politica nunca se cancelan.
+- **PRs desde forks**: se omiten, porque GitHub no expone secretos a esos PRs.
+- **Runners self-hosted**: `actions/checkout@v6`, `upload-artifact@v7` y `download-artifact@v8` usan Node.js 24 y requieren Actions Runner 2.327.1 o superior. Se requiere Java para el scanner y el API wrapper (preinstalado en `ubuntu-latest`).
 
 ---
 
 ## Personalizacion
 
-### Cambiar Politica de Gate de PR
+**Cambiar la politica del gate de PR**: edita `PR_GATE_POLICY` en el `env:` global. Las politicas integradas se soportan por nombre. Para una politica personalizada, descargala con `--request_policy` y usa `--policy_file` ([parametros](https://docs.veracode.com/r/r_pipeline_scan_commands)).
 
-En el job `pr-pipeline-scan`:
-```yaml
---policy_name "Tu Politica Personalizada"
+**Relajar el gate de feature**: agrega argumentos en la rama `else` del bloque del gate, por ejemplo:
+
+```bash
+GATE_ARGS=(--fail_on_severity "Very High, High")
 ```
 
-### Cambiar Gate de Severidad
+**Escanear todas las ramas que no son la por defecto**: reemplaza `'feature/**'` en `on.push.branches` por `'**'`. Las condiciones de los jobs ya lo contemplan.
+
+**Agregar un paso de build**: si el autopackaging no cubre tu proyecto, compila antes del autopackager o reemplazalo y escribe las rutas de tus artefactos en `artifact_list.txt`:
 
 ```yaml
---fail_on_severity "Very High"           # Solo falla en Very High
---fail_on_severity "Very High, High"     # Falla en Very High y High (default)
---fail_on_severity ""                    # Sin gate (solo informativo)
+- name: Build
+  run: mvn -B clean package -DskipTests
 ```
-
-### Nombre de Sandbox Personalizado
-
-En el job `release-sandbox-scan`:
-```yaml
--sandboxname "tu-nombre-de-sandbox"
-```
-
-### Agregar Paso de Build
-
-Si el autopackager no funciona para tu proyecto, agrega un paso de build:
-
-```yaml
-- name: Build Application
-  run: |
-    # Maven
-    mvn -B clean package -DskipTests
-    
-    # Gradle
-    ./gradlew build -x test
-    
-    # npm
-    npm ci && npm run build
-```
-
-### Cambiar Branches de Trigger
-
-Modifica la seccion `on`:
-```yaml
-on:
-  push:
-    branches:
-      - main
-      - develop
-      - 'release/**'
-      - 'feature/**'
-```
-
----
-
-## Parametros de Pipeline Scan
-
-| Parametro | Descripcion | Usado En |
-|-----------|-------------|----------|
-| `-f` | Archivo a escanear | Todos los pipeline scans |
-| `-vid` | ID de API Veracode | Todos los scans |
-| `-vkey` | Key de API Veracode | Todos los scans |
-| `--fail_on_severity` | Severidades que fallan el build | Feature (vacio), PR (Very High,High) |
-| `--policy_name` | Politica contra la cual evaluar | Scans de PR |
-| `--issue_details` | Incluir info detallada de hallazgos | Todos los scans |
-| `-jo` | Solo salida JSON | Todos los scans |
-
----
-
-## Parametros de API Wrapper
-
-| Parametro | Descripcion | Usado En |
-|-----------|-------------|----------|
-| `-action` | UploadAndScan | Todos los platform scans |
-| `-appname` | Nombre del perfil de aplicacion | Todos los platform scans |
-| `-createprofile` | Crear app si no existe | Todos los platform scans |
-| `-autoscan` | Iniciar escaneo automaticamente | Todos los platform scans |
-| `-sandboxname` | Nombre del sandbox | Scans de release |
-| `-createsandbox` | Crear sandbox si no existe | Scans de release |
-| `-filepath` | Ruta a artefactos (archivo o carpeta) | Todos los platform scans |
-| `-version` | Etiqueta de version del escaneo | Todos los platform scans |
 
 ---
 
 ## Solucion de Problemas
 
-### No se encontraron artefactos
-
-**Sintomas**: Job package falla con "No se encontraron artefactos empaquetados"
-
-**Soluciones**:
-1. Asegurar que el proyecto compila exitosamente antes del empaquetado
-2. Verificar que artefactos compilados existen en ubicaciones esperadas
-3. Revisar salida del autopackager de Veracode CLI por errores
-4. Agregar paso de build explicito antes del autopackager
-
-### Pipeline scan no produce resultados
-
-**Sintomas**: `results.json` no se crea para un artefacto
-
-**Causas**:
-- Artefacto no escaneable (JARs de test, resource bundles)
-- Artefacto no contiene codigo de aplicacion
-- Tipo de modulo no soportado
-
-**Soluciones**:
-1. Revisar salida del Pipeline Scanner por advertencias
-2. Verificar que el artefacto contiene codigo de aplicacion
-3. Esto es normal para algunos artefactos; el workflow continua
-
-### Gate de politica falla inesperadamente
-
-**Sintomas**: Pipeline scan de PR falla sin problemas obvios
-
-**Soluciones**:
-1. Verificar que nombre de politica coincide exactamente (sensible a mayusculas)
-2. Confirmar que la politica existe en tu cuenta Veracode
-3. Revisar `results.json` por hallazgos especificos
-4. Verificar umbrales de la politica
-
-### PRs de forks fallan o se omiten
-
-**Sintomas**: PRs de forks no se ejecutan o fallan con errores de autenticacion
-
-**Causa**: PRs de forks no acceden a secrets del repositorio por defecto
-
-**Soluciones**:
-1. El workflow omite intencionalmente PRs de forks
-2. Para open source, considera `pull_request_target` (con precaucion)
-3. Requerir que contribuidores ejecuten scans localmente
-
-### Upload de Sandbox/Policy falla
-
-**Sintomas**: API Wrapper falla al subir
-
-**Soluciones**:
-1. Verificar que `VERACODE_API_ID` y `VERACODE_API_KEY` estan configurados
-2. Verificar que credenciales tienen permisos de upload
-3. Asegurar que nombre de perfil de app es valido (sin caracteres especiales)
-4. Revisar salida del API Wrapper por errores
-
----
-
-## Archivos
-
-| Archivo | Descripcion |
-|---------|--------|-------------|
-| `veracode-scans.yml` | Workflow de GitHub Actions |
-| `veracode-strategy.md` | Documentacion |
-
----
-
-## Inicio Rapido
-
-1. Copia `veracode-scans.yml` a `.github/workflows/veracode.yml`
-2. Agrega secrets en **Settings > Secrets and variables > Actions**:
-   - `VERACODE_API_ID`
-   - `VERACODE_API_KEY`
-   - `SRCCLR_API_TOKEN` (opcional)
-3. Haz push a un feature branch para disparar el primer escaneo
-4. Revisa resultados en los artefactos del workflow
-
----
-
-## Mejores Practicas
-
-**Shift-Left**:
-- Ejecutar Pipeline Scan en cada commit
-- Habilitar gates en PRs para bloquear hallazgos High/Very High
-- Educar al equipo sobre hallazgos comunes
-
-**Compliance**:
-- Policy Scan obligatorio antes de produccion
-- Mantener historial de escaneos
-- Documentar excepciones y mitigaciones
-
-**Optimizacion**:
-- Usar Pipeline Scan para iteracion rapida
-- Reservar Policy Scan para releases oficiales
-- Cachear dependencias para acelerar builds
-
-**SCA**:
-- Monitorear nuevos CVEs continuamente
-- Actualizar dependencias regularmente
-- Revisar licencias antes de adoptar librerias
+| Sintoma | Revisar |
+|---------|---------|
+| `No se encontraron artefactos empaquetados` | Ejecuta `veracode package --source . --output verascan --trust` localmente. Confirma que el tipo de proyecto esta soportado o agrega un paso de build. |
+| Pipeline Scan sale con `255` | Credenciales invalidas, red bloqueada hacia `api.veracode.com`, o artefacto no soportado. |
+| Pipeline Scan sale con `253` o `254` | Timeout del escaneo. Agrega `--timeout <minutos>` (maximo 60) o divide artefactos grandes. |
+| El gate de PR falla inesperadamente | Abre `pipeline-scan-results` y revisa `results.json`. Confirma que el nombre de la politica coincide exactamente. |
+| `UploadAndScan` rechazado | Puede haber un escaneo previo en curso para el perfil. Esperalo o cancelalo en la Plataforma. Verifica que el usuario de API tenga permisos de carga. |
+| Jobs omitidos en la rama por defecto | La rama por defecto en GitHub no coincide con el filtro `branches:`. |
 
 ---
 
 ## Recursos
 
-- [Documentacion Veracode](https://docs.veracode.com)
-- [Instalacion Veracode CLI](https://docs.veracode.com/r/Install_the_Veracode_CLI)
-- [Pipeline Scan](https://docs.veracode.com/r/Pipeline_Scan)
+- [Parametros de Pipeline Scan](https://docs.veracode.com/r/r_pipeline_scan_commands)
+- [Codigos de estado de Pipeline Scan](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)
+- [Veracode CLI](https://docs.veracode.com/r/Install_the_Veracode_CLI)
 - [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers)
-- [SCA Agent-Based Scans](https://docs.veracode.com/r/Agent_Based_Scans)
-- [Documentacion GitHub Actions](https://docs.github.com/en/actions)
+- [SCA basado en agente](https://docs.veracode.com/r/Agent_Based_Scans)
+- [GitHub Actions: eventos que disparan workflows](https://docs.github.com/actions/using-workflows/events-that-trigger-workflows)
