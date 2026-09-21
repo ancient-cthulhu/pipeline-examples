@@ -115,7 +115,7 @@ jobs:
   # PIPELINE SCAN: push a feature/** (falla con cualquier hallazgo) y PR (gate de politica)
   # ===========================================================================
   pipeline-scan:
-    name: Pipeline Scan (${{ github.event_name == 'pull_request' && 'gate PR' || 'feature' }})
+    name: Pipeline Scan
     needs: package
     if: >-
       github.event_name == 'pull_request' ||
