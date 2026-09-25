@@ -90,7 +90,7 @@ Keeping `artifact_list.txt` outside `verascan/` prevents it from being uploaded 
 
 ### SCA
 
-Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor` in parallel with Package. Errors are swallowed with `|| echo`. Remove that suffix to enforce SCA policy.
+Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"` in parallel with Package. The `--appname` value is the same application profile the policy scan uploads to, so agent-based findings land against the same profile. The stage recomputes it from `SYSTEM_COLLECTIONURI`, `SYSTEM_TEAMPROJECT` and `BUILD_REPOSITORY_NAME` so it stays `dependsOn: []`. Errors are swallowed with `|| echo`. Remove that suffix to enforce SCA policy.
 
 ### PipelineScan
 

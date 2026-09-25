@@ -124,7 +124,7 @@ pipeline {
                                     // returnStatus mantiene SCA no bloqueante aunque ci.ps1 salga con error
                                     def rc = powershell(returnStatus: true, script: '''
                                         $script = (New-Object System.Net.WebClient).DownloadString("https://sca-downloads.veracode.com/ci.ps1")
-                                        Invoke-Command -ScriptBlock ([scriptblock]::Create($script)) -ArgumentList @("scan", "--recursive", "--update-advisor")
+                                        Invoke-Command -ScriptBlock ([scriptblock]::Create($script)) -ArgumentList @("scan", "--recursive", "--update-advisor", "--appname", $env:APP_NAME)
                                     ''')
                                     echo "Escaneo SCA completado (salida ${rc})"
                                 }

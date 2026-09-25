@@ -59,7 +59,7 @@ Installs the Veracode CLI, runs `veracode package --source . --output verascan -
 
 ### Agent-Based SCA
 
-Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`. Errors are swallowed with `|| echo` so SCA never blocks. Remove that suffix to enforce SCA policy.
+Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"`. The `--appname` value is the same application profile the policy scan uploads to, so agent-based findings land against the same profile. Errors are swallowed with `|| echo` so SCA never blocks. Remove that suffix to enforce SCA policy.
 
 ### Pipeline Scan (feature / PR gate)
 

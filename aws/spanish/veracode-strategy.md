@@ -81,7 +81,7 @@ El buildspec igual valida el disparador, asi que un filtro mas amplio solo cuest
 
 1. **Resolver modo** y validar credenciales (solo se requieren cuando se ejecutara un escaneo).
 2. **Package**: instala Veracode CLI, ejecuta `veracode package --source . --output verascan --trust`, escribe `artifact_list.txt`, falla si esta vacio.
-3. **SCA**: `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`, errores ignorados con `|| echo`.
+3. **SCA**: `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"`, errores ignorados con `|| echo`. El valor de `--appname` es el mismo perfil de aplicacion al que sube el policy scan, asi los hallazgos del agente quedan en el mismo perfil. `APP_NAME` se resuelve una vez en el paso de resolucion de modo y lo reutiliza el policy scan.
 4. **Pipeline Scan** (`feature`/`pr`): cada artefacto se escanea por separado, los fallos se acumulan y el build falla al final. `pr` agrega `--policy_name "$PR_GATE_POLICY"`. Los resultados van a `scan_results/`.
 5. **Policy Scan** (`policy`): ultimo [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers) `UploadAndScan` sobre `verascan/`, version `<rama por defecto>-<CODEBUILD_BUILD_NUMBER>`.
 

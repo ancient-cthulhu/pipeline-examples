@@ -72,7 +72,7 @@ API credentials: [Generate API credentials](https://docs.veracode.com/r/t_create
 
 ### sca
 
-Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`. Errors are swallowed with `|| echo` so SCA never blocks the build. Remove that suffix to enforce SCA policy.
+Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"`. The `--appname` value is the same application profile the policy scan uploads to, so agent-based findings land against the same profile. The job recomputes the name from `VERACODE_APP_NAME` or `github.repository` rather than taking `needs: package`, so SCA still starts in parallel. Errors are swallowed with `|| echo` so SCA never blocks the build. Remove that suffix to enforce SCA policy.
 
 ### pipeline-scan
 

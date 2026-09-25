@@ -73,7 +73,7 @@ Credenciales de API: [Generar credenciales de API](https://docs.veracode.com/r/t
 
 ### sca
 
-Ejecuta `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`. Los errores se ignoran con `|| echo` para que SCA nunca bloquee el build. Quita ese sufijo para aplicar la politica de SCA.
+Ejecuta `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"`. El valor de `--appname` es el mismo perfil de aplicacion al que sube el policy scan, asi los hallazgos del agente quedan en el mismo perfil. El job recalcula el nombre desde `VERACODE_APP_NAME` o `github.repository` en vez de usar `needs: package`, asi SCA sigue arrancando en paralelo. Los errores se ignoran con `|| echo` para que SCA nunca bloquee el build. Quita ese sufijo para aplicar la politica de SCA.
 
 ### pipeline-scan
 

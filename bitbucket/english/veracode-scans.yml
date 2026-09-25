@@ -54,7 +54,9 @@ definitions:
     - step: &sca
         name: Agent-Based SCA
         script:
-          - curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
+          # Same computation as the policy scan profile
+          - APP_NAME="${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}"
+          - curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor --appname "$APP_NAME" || echo "SCA scan completed"
 
     # -------------------------------------------------------------------------
     # PIPELINE SCAN (feature): no fail criteria, every flaw counts

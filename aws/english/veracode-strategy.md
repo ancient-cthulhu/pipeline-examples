@@ -81,7 +81,7 @@ The buildspec still validates the trigger, so a looser filter only costs build m
 
 1. **Resolve mode** and validate credentials (credentials are only required when a scan will run).
 2. **Package**: installs the Veracode CLI, runs `veracode package --source . --output verascan --trust`, writes `artifact_list.txt`, fails if empty.
-3. **SCA**: `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`, errors swallowed with `|| echo`.
+3. **SCA**: `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"`, errors swallowed with `|| echo`. The `--appname` value is the same application profile the policy scan uploads to, so agent-based findings land against the same profile. `APP_NAME` is resolved once in the mode-resolution step and reused by the policy scan.
 4. **Pipeline Scan** (`feature`/`pr`): each artifact scanned separately, failures aggregated, build fails at the end. `pr` adds `--policy_name "$PR_GATE_POLICY"`. Results go to `scan_results/`.
 5. **Policy Scan** (`policy`): latest [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers) `UploadAndScan` on `verascan/`, version `<default branch>-<CODEBUILD_BUILD_NUMBER>`.
 

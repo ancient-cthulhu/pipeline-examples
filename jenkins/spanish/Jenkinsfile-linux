@@ -107,7 +107,8 @@ pipeline {
                         script {
                             try {
                                 withCredentials([string(credentialsId: 'srcclr-api-token', variable: 'SRCCLR_API_TOKEN')]) {
-                                    sh 'curl -sSL https://sca-downloads.veracode.com/ci.sh | sh -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"'
+                                    // APP_NAME comes from the Package stage, same value the policy scan uses
+                                    sh 'curl -sSL https://sca-downloads.veracode.com/ci.sh | sh -s -- scan --recursive --update-advisor --appname "$APP_NAME" || echo "Escaneo SCA completado"'
                                 }
                             } catch (org.jenkinsci.plugins.credentialsbinding.impl.CredentialNotFoundException e) {
                                 echo "Credencial 'srcclr-api-token' no configurada. Se omite SCA."

@@ -74,7 +74,7 @@ Image `ubuntu:22.04`. Installs the Veracode CLI, runs `veracode package --source
 
 ### sca
 
-Image `eclipse-temurin:17-jdk`, `needs: []` so it starts immediately. Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`. `allow_failure: true` shows SCA failures as warnings without blocking. Remove it to enforce SCA policy.
+Image `eclipse-temurin:17-jdk`, `needs: []` so it starts immediately. Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"`, reusing the shared `&set_app_name` anchor. The `--appname` value is the same application profile the policy scan uploads to, so agent-based findings land against the same profile. `allow_failure: true` shows SCA failures as warnings without blocking. Remove it to enforce SCA policy.
 
 ### pipeline-scan
 

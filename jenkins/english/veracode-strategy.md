@@ -100,10 +100,12 @@ Multibranch `JOB_NAME` is `<folder>/<repo>/<branch>`. The last segment is remove
 
 | Agent | Command |
 |-------|---------|
-| Linux | `curl -sSL https://sca-downloads.veracode.com/ci.sh \| sh -s -- scan --recursive --update-advisor` |
-| Windows | Downloads `https://sca-downloads.veracode.com/ci.ps1` and runs it with `-ArgumentList scan, --recursive, --update-advisor` ([docs](https://docs.veracode.com/r/t_sc_agent_proxy)) |
+| Linux | `curl -sSL https://sca-downloads.veracode.com/ci.sh \| sh -s -- scan --recursive --update-advisor --appname "$APP_NAME"` |
+| Windows | Downloads `https://sca-downloads.veracode.com/ci.ps1` and runs it with `-ArgumentList scan, --recursive, --update-advisor, --appname, $env:APP_NAME` ([docs](https://docs.veracode.com/r/t_sc_agent_proxy)) |
 
 Non-blocking on both: Linux swallows errors with `|| echo`, Windows uses `powershell(returnStatus: true)`.
+
+`APP_NAME` is the value resolved in the Package stage, so agent-based findings land against the same application profile the policy scan uploads to.
 
 ### Pipeline Scan
 

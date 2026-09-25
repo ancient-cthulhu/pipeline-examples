@@ -101,10 +101,12 @@ En multibranch `JOB_NAME` es `<carpeta>/<repo>/<rama>`. Se quita el ultimo segme
 
 | Agente | Comando |
 |--------|---------|
-| Linux | `curl -sSL https://sca-downloads.veracode.com/ci.sh \| sh -s -- scan --recursive --update-advisor` |
-| Windows | Descarga `https://sca-downloads.veracode.com/ci.ps1` y lo ejecuta con `-ArgumentList scan, --recursive, --update-advisor` ([docs](https://docs.veracode.com/r/t_sc_agent_proxy)) |
+| Linux | `curl -sSL https://sca-downloads.veracode.com/ci.sh \| sh -s -- scan --recursive --update-advisor --appname "$APP_NAME"` |
+| Windows | Descarga `https://sca-downloads.veracode.com/ci.ps1` y lo ejecuta con `-ArgumentList scan, --recursive, --update-advisor, --appname, $env:APP_NAME` ([docs](https://docs.veracode.com/r/t_sc_agent_proxy)) |
 
 No bloqueante en ambos: Linux ignora errores con `|| echo`, Windows usa `powershell(returnStatus: true)`.
+
+`APP_NAME` es el valor resuelto en el stage de empaquetado, asi los hallazgos del agente quedan en el mismo perfil de aplicacion al que sube el policy scan.
 
 ### Pipeline Scan
 

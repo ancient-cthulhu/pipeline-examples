@@ -91,7 +91,7 @@ Mantener `artifact_list.txt` fuera de `verascan/` evita que se suba a la Platafo
 
 ### SCA
 
-Ejecuta `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor` en paralelo con Package. Los errores se ignoran con `|| echo`. Quita ese sufijo para aplicar la politica de SCA.
+Ejecuta `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"` en paralelo con Package. El valor de `--appname` es el mismo perfil de aplicacion al que sube el policy scan, asi los hallazgos del agente quedan en el mismo perfil. El stage lo recalcula desde `SYSTEM_COLLECTIONURI`, `SYSTEM_TEAMPROJECT` y `BUILD_REPOSITORY_NAME` para seguir siendo `dependsOn: []`. Los errores se ignoran con `|| echo`. Quita ese sufijo para aplicar la politica de SCA.
 
 ### PipelineScan
 
