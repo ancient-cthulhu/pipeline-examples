@@ -107,6 +107,8 @@ Non-blocking on both: Linux swallows errors with `|| echo`, Windows uses `powers
 
 `APP_NAME` is the value resolved in the Package stage, so agent-based findings land against the same application profile the policy scan uploads to.
 
+`--appname` makes the agent call the Veracode Platform, which needs HMAC credentials on top of `SRCCLR_API_TOKEN`. The agent reads them only from `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`, so the step maps your existing API ID and key onto those two names. Without them the scan fails with `HMAC authentication failed for license API` ([HMAC credentials](https://docs.veracode.com/r/HMAC_credentials)). The profile must also have at least one completed static scan before the agent can link to it ([SCA agent commands](https://docs.veracode.com/r/SCA_agent_commands)).
+
 ### Pipeline Scan
 
 Each artifact is scanned separately, the loop continues after a failure, and the stage fails at the end if any artifact failed. Change requests add `--policy_name "$PR_GATE_POLICY"`; feature pushes add no gate arguments. `scan_results/` is archived even on failure.

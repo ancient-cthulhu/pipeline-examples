@@ -76,6 +76,8 @@ Image `ubuntu:22.04`. Installs the Veracode CLI, runs `veracode package --source
 
 Image `eclipse-temurin:17-jdk`, `needs: []` so it starts immediately. Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"`, reusing the shared `&set_app_name` anchor. The `--appname` value is the same application profile the policy scan uploads to, so agent-based findings land against the same profile. `allow_failure: true` shows SCA failures as warnings without blocking. Remove it to enforce SCA policy.
 
+`--appname` makes the agent call the Veracode Platform, which needs HMAC credentials on top of `SRCCLR_API_TOKEN`. The agent reads them only from `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`, so the step maps your existing API ID and key onto those two names. Without them the scan fails with `HMAC authentication failed for license API` ([HMAC credentials](https://docs.veracode.com/r/HMAC_credentials)). The profile must also have at least one completed static scan before the agent can link to it ([SCA agent commands](https://docs.veracode.com/r/SCA_agent_commands)).
+
 ### pipeline-scan
 
 Scans each artifact separately, continues after failures, then fails the job if any artifact failed.

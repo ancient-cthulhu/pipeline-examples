@@ -123,8 +123,13 @@ pipeline {
                                 withCredentials([string(credentialsId: 'srcclr-api-token', variable: 'SRCCLR_API_TOKEN')]) {
                                     // returnStatus keeps SCA non-blocking even if ci.ps1 exits non-zero
                                     def rc = powershell(returnStatus: true, script: '''
+                                        # --appname authenticates to the Platform with HMAC, which the
+                                        # agent reads from these two variable names specifically
+                                        $env:VERACODE_API_KEY_ID = $env:VERACODE_API_ID
+                                        $env:VERACODE_API_KEY_SECRET = $env:VERACODE_API_KEY
+
                                         $script = (New-Object System.Net.WebClient).DownloadString("https://sca-downloads.veracode.com/ci.ps1")
-                                        Invoke-Command -ScriptBlock ([scriptblock]::Create($script)) -ArgumentList @("scan", "--recursive", "--update-advisor", "--appname", $env:APP_NAME)
+                                        Invoke-Command -ScriptBlock ([scriptblock]::Create($script)) -ArgumentList @("scan", "--recursive", "--update-advisor", "--appname=$env:APP_NAME")
                                     ''')
                                     echo "SCA scan completed (exit ${rc})"
                                 }

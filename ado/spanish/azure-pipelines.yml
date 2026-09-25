@@ -102,10 +102,14 @@ stages:
               APP_NAME="${VERACODE_APP_NAME:-${ORG_NAME}/${SYSTEM_TEAMPROJECT}/${BUILD_REPOSITORY_NAME}}"
               echo "Perfil de Aplicacion Veracode: $APP_NAME"
               curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- \
-                scan --recursive --update-advisor --appname "$APP_NAME" || echo "Escaneo SCA completado"
+                scan --recursive --update-advisor --appname="$APP_NAME" || echo "Escaneo SCA completado"
             displayName: Escaneo Veracode SCA
             env:
               SRCCLR_API_TOKEN: $(SRCCLR_API_TOKEN)
+              # --appname se autentica con la Plataforma via HMAC, que el agente
+              # lee exactamente desde estos dos nombres de variable
+              VERACODE_API_KEY_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY_SECRET: $(VERACODE_API_KEY)
 
   # ===========================================================================
   # PIPELINE SCAN: push a feature/* (falla con cualquier hallazgo) y PR (gate de politica)
