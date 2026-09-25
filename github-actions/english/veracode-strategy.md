@@ -51,8 +51,8 @@ on: push (main, feature/**) | pull_request (to main)
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `VERACODE_API_ID` | Yes | Veracode API ID. Also mapped to `VERACODE_API_KEY_ID` for the SCA `--appname` link |
-| `VERACODE_API_KEY` | Yes | Veracode API Key. Also mapped to `VERACODE_API_KEY_SECRET` for the SCA `--appname` link |
+| `VERACODE_API_ID` | Yes | Veracode API ID |
+| `VERACODE_API_KEY` | Yes | Veracode API Key |
 | `SRCCLR_API_TOKEN` | For SCA | Agent-based SCA token |
 | `VERACODE_APP_NAME` | No | Application profile name. Defaults to `github.repository` (`org/repo`) |
 
@@ -72,9 +72,7 @@ API credentials: [Generate API credentials](https://docs.veracode.com/r/t_create
 
 ### sca
 
-Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"`. The `--appname` value is the same application profile the policy scan uploads to, so agent-based findings land against the same profile. The job recomputes the name from `VERACODE_APP_NAME` or `github.repository` rather than taking `needs: package`, so SCA still starts in parallel.
-
-`--appname` makes the agent call the Veracode Platform, which needs HMAC credentials on top of `SRCCLR_API_TOKEN`. The agent reads them only from `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`, so the step maps your existing API ID and key onto those two names. Without them the scan fails with `HMAC authentication failed for license API` ([HMAC credentials](https://docs.veracode.com/r/HMAC_credentials)). The profile must also have at least one completed static scan before the agent can link to it ([SCA agent commands](https://docs.veracode.com/r/SCA_agent_commands)). Errors are swallowed with `|| echo` so SCA never blocks the build. Remove that suffix to enforce SCA policy.
+Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`. Errors are swallowed with `|| echo` so SCA never blocks the build. Remove that suffix to enforce SCA policy.
 
 ### pipeline-scan
 

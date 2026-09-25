@@ -123,13 +123,8 @@ pipeline {
                                 withCredentials([string(credentialsId: 'srcclr-api-token', variable: 'SRCCLR_API_TOKEN')]) {
                                     // returnStatus mantiene SCA no bloqueante aunque ci.ps1 salga con error
                                     def rc = powershell(returnStatus: true, script: '''
-                                        # --appname se autentica con la Plataforma via HMAC, que el agente
-                                        # lee exactamente desde estos dos nombres de variable
-                                        $env:VERACODE_API_KEY_ID = $env:VERACODE_API_ID
-                                        $env:VERACODE_API_KEY_SECRET = $env:VERACODE_API_KEY
-
                                         $script = (New-Object System.Net.WebClient).DownloadString("https://sca-downloads.veracode.com/ci.ps1")
-                                        Invoke-Command -ScriptBlock ([scriptblock]::Create($script)) -ArgumentList @("scan", "--recursive", "--update-advisor", "--appname=$env:APP_NAME")
+                                        Invoke-Command -ScriptBlock ([scriptblock]::Create($script)) -ArgumentList @("scan", "--recursive", "--update-advisor")
                                     ''')
                                     echo "Escaneo SCA completado (salida ${rc})"
                                 }

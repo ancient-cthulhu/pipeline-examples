@@ -69,10 +69,6 @@ phases:
           esac
         fi
         echo "Trigger: ${TRIGGER:-none}  Branch: ${BRANCH:-n/a}  Scan mode: $SCAN_MODE"
-        # Same computation used by the policy scan below
-        # CODEBUILD_BUILD_ID is "<project-name>:<uuid>"
-        APP_NAME="${VERACODE_APP_NAME:-${CODEBUILD_BUILD_ID%%:*}}"
-        echo "Veracode Application Profile: $APP_NAME"
       - |
         if [ "$SCAN_MODE" != "skip" ] && { [ -z "$VERACODE_API_ID" ] || [ -z "$VERACODE_API_KEY" ]; }; then
           echo "ERROR: VERACODE_API_ID and VERACODE_API_KEY are required"
@@ -105,12 +101,7 @@ phases:
       # -----------------------------------------------------------------------
       - |
         if [ "$SCAN_MODE" != "skip" ]; then
-          # --appname authenticates to the Platform with HMAC, which the agent
-          # reads from these two variable names specifically
-          export VERACODE_API_KEY_ID="$VERACODE_API_ID"
-          export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
-          curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- \
-            scan --recursive --update-advisor --appname="$APP_NAME" || echo "SCA scan completed"
+          curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
         fi
 
       # -----------------------------------------------------------------------
@@ -189,6 +180,10 @@ phases:
             echo "ERROR: VeracodeJavaAPI.jar not found"
             exit 1
           fi
+
+          # CODEBUILD_BUILD_ID is "<project-name>:<uuid>"
+          APP_NAME="${VERACODE_APP_NAME:-${CODEBUILD_BUILD_ID%%:*}}"
+          echo "Veracode Application Profile: $APP_NAME"
 
           java -jar "$JAR" \
             -vid "$VERACODE_API_ID" \

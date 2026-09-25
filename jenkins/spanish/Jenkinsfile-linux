@@ -107,15 +107,7 @@ pipeline {
                         script {
                             try {
                                 withCredentials([string(credentialsId: 'srcclr-api-token', variable: 'SRCCLR_API_TOKEN')]) {
-                                    // APP_NAME viene del stage de empaquetado, el mismo valor que usa el policy scan
-                                    // --appname se autentica con la Plataforma via HMAC, que el agente
-                                    // lee exactamente desde estos dos nombres de variable
-                                    sh '''
-                                        export VERACODE_API_KEY_ID="$VERACODE_API_ID"
-                                        export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
-                                        curl -sSL https://sca-downloads.veracode.com/ci.sh | sh -s -- \\
-                                            scan --recursive --update-advisor --appname="$APP_NAME" || echo "Escaneo SCA completado"
-                                    '''
+                                    sh 'curl -sSL https://sca-downloads.veracode.com/ci.sh | sh -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"'
                                 }
                             } catch (org.jenkinsci.plugins.credentialsbinding.impl.CredentialNotFoundException e) {
                                 echo "Credencial 'srcclr-api-token' no configurada. Se omite SCA."

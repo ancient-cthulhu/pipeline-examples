@@ -97,19 +97,10 @@ stages:
         steps:
           - checkout: self
           - script: |
-              # Same computation as the policy scan profile
-              ORG_NAME=$(echo "$SYSTEM_COLLECTIONURI" | sed -E 's|https://dev.azure.com/([^/]+)/?|\1|; s|https://([^.]+)\.visualstudio.com/?|\1|')
-              APP_NAME="${VERACODE_APP_NAME:-${ORG_NAME}/${SYSTEM_TEAMPROJECT}/${BUILD_REPOSITORY_NAME}}"
-              echo "Veracode Application Profile: $APP_NAME"
-              curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- \
-                scan --recursive --update-advisor --appname="$APP_NAME" || echo "SCA scan completed"
+              curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
             displayName: Veracode SCA scan
             env:
               SRCCLR_API_TOKEN: $(SRCCLR_API_TOKEN)
-              # --appname authenticates to the Platform with HMAC, which the agent
-              # reads from these two variable names specifically
-              VERACODE_API_KEY_ID: $(VERACODE_API_ID)
-              VERACODE_API_KEY_SECRET: $(VERACODE_API_KEY)
 
   # ===========================================================================
   # PIPELINE SCAN: feature/* push (any flaw fails) and PR (policy gate)

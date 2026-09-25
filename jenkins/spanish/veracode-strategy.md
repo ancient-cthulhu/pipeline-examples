@@ -101,14 +101,10 @@ En multibranch `JOB_NAME` es `<carpeta>/<repo>/<rama>`. Se quita el ultimo segme
 
 | Agente | Comando |
 |--------|---------|
-| Linux | `curl -sSL https://sca-downloads.veracode.com/ci.sh \| sh -s -- scan --recursive --update-advisor --appname "$APP_NAME"` |
-| Windows | Descarga `https://sca-downloads.veracode.com/ci.ps1` y lo ejecuta con `-ArgumentList scan, --recursive, --update-advisor, --appname, $env:APP_NAME` ([docs](https://docs.veracode.com/r/t_sc_agent_proxy)) |
+| Linux | `curl -sSL https://sca-downloads.veracode.com/ci.sh \| sh -s -- scan --recursive --update-advisor` |
+| Windows | Descarga `https://sca-downloads.veracode.com/ci.ps1` y lo ejecuta con `-ArgumentList scan, --recursive, --update-advisor` ([docs](https://docs.veracode.com/r/t_sc_agent_proxy)) |
 
 No bloqueante en ambos: Linux ignora errores con `|| echo`, Windows usa `powershell(returnStatus: true)`.
-
-`APP_NAME` es el valor resuelto en el stage de empaquetado, asi los hallazgos del agente quedan en el mismo perfil de aplicacion al que sube el policy scan.
-
-`--appname` hace que el agente llame a la Plataforma Veracode, lo que requiere credenciales HMAC ademas de `SRCCLR_API_TOKEN`. El agente las lee unicamente desde `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET`, por eso el paso mapea tu API ID y key existentes a esos dos nombres. Sin ellas el escaneo falla con `HMAC authentication failed for license API` ([credenciales HMAC](https://docs.veracode.com/r/HMAC_credentials)). Ademas el perfil debe tener al menos un static scan completado antes de que el agente pueda enlazarlo ([comandos del agente SCA](https://docs.veracode.com/r/SCA_agent_commands)).
 
 ### Pipeline Scan
 

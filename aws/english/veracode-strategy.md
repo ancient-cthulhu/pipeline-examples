@@ -81,9 +81,7 @@ The buildspec still validates the trigger, so a looser filter only costs build m
 
 1. **Resolve mode** and validate credentials (credentials are only required when a scan will run).
 2. **Package**: installs the Veracode CLI, runs `veracode package --source . --output verascan --trust`, writes `artifact_list.txt`, fails if empty.
-3. **SCA**: `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"`, errors swallowed with `|| echo`. The `--appname` value is the same application profile the policy scan uploads to, so agent-based findings land against the same profile. `APP_NAME` is resolved once in the mode-resolution step and reused by the policy scan.
-
-`--appname` makes the agent call the Veracode Platform, which needs HMAC credentials on top of `SRCCLR_API_TOKEN`. The agent reads them only from `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`, so the step maps your existing API ID and key onto those two names. Without them the scan fails with `HMAC authentication failed for license API` ([HMAC credentials](https://docs.veracode.com/r/HMAC_credentials)). The profile must also have at least one completed static scan before the agent can link to it ([SCA agent commands](https://docs.veracode.com/r/SCA_agent_commands)).
+3. **SCA**: `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`, errors swallowed with `|| echo`.
 4. **Pipeline Scan** (`feature`/`pr`): each artifact scanned separately, failures aggregated, build fails at the end. `pr` adds `--policy_name "$PR_GATE_POLICY"`. Results go to `scan_results/`.
 5. **Policy Scan** (`policy`): latest [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers) `UploadAndScan` on `verascan/`, version `<default branch>-<CODEBUILD_BUILD_NUMBER>`.
 

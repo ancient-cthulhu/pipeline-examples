@@ -54,13 +54,7 @@ definitions:
     - step: &sca
         name: SCA Basado en Agente
         script:
-          # Mismo calculo que el perfil del policy scan
-          - APP_NAME="${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}"
-          # --appname se autentica con la Plataforma via HMAC, que el agente
-          # lee exactamente desde estos dos nombres de variable
-          - export VERACODE_API_KEY_ID="$VERACODE_API_ID"
-          - export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
-          - curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor --appname="$APP_NAME" || echo "Escaneo SCA completado"
+          - curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
 
     # -------------------------------------------------------------------------
     # PIPELINE SCAN (feature): sin criterio de fallo, cada hallazgo cuenta

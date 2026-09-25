@@ -91,9 +91,7 @@ Mantener `artifact_list.txt` fuera de `verascan/` evita que se suba a la Platafo
 
 ### SCA
 
-Ejecuta `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor --appname "$APP_NAME"` en paralelo con Package. El valor de `--appname` es el mismo perfil de aplicacion al que sube el policy scan, asi los hallazgos del agente quedan en el mismo perfil. El stage lo recalcula desde `SYSTEM_COLLECTIONURI`, `SYSTEM_TEAMPROJECT` y `BUILD_REPOSITORY_NAME` para seguir siendo `dependsOn: []`.
-
-`--appname` hace que el agente llame a la Plataforma Veracode, lo que requiere credenciales HMAC ademas de `SRCCLR_API_TOKEN`. El agente las lee unicamente desde `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET`, por eso el paso mapea tu API ID y key existentes a esos dos nombres. Sin ellas el escaneo falla con `HMAC authentication failed for license API` ([credenciales HMAC](https://docs.veracode.com/r/HMAC_credentials)). Ademas el perfil debe tener al menos un static scan completado antes de que el agente pueda enlazarlo ([comandos del agente SCA](https://docs.veracode.com/r/SCA_agent_commands)). Los errores se ignoran con `|| echo`. Quita ese sufijo para aplicar la politica de SCA.
+Ejecuta `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor` en paralelo con Package. Los errores se ignoran con `|| echo`. Quita ese sufijo para aplicar la politica de SCA.
 
 ### PipelineScan
 
