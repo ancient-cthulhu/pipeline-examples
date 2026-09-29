@@ -16,9 +16,9 @@
 //
 // Scan selection:
 //   push to default branch          -> Policy Scan (all artifacts, one upload)
-//   push to feature/*               -> Pipeline Scan (fails on any flaw)
+//   push to any other branch        -> Pipeline Scan (fails on any flaw)
 //   change request to default branch -> Pipeline Scan (policy gate)
-//   all of the above                -> Agent-based SCA (non-blocking)
+//   all of the above                -> IaC scan + Agent-based SCA (non-blocking)
 //
 // If your default branch is not "main", change DEFAULT_BRANCH below.
 // =============================================================================
@@ -74,6 +74,11 @@ pipeline {
                     curl -fsS https://tools.veracode.com/veracode-cli/install | sh
                     ./veracode version
 
+                    # Static scan of the checked-out files: IaC misconfigurations and secrets
+                    export VERACODE_API_KEY_ID="$VERACODE_API_ID"
+                    export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
+                    ./veracode scan --source . --type directory --format table || echo "IaC scan completed"
+
                     mkdir -p verascan
                     ./veracode package --source "${VERACODE_SOURCE_DIR:-app}" --output verascan --trust
                     ls -lhR verascan
@@ -117,13 +122,13 @@ pipeline {
                 }
 
                 // -------------------------------------------------------------
-                // PIPELINE SCAN: feature/* push (any flaw fails) and
+                // PIPELINE SCAN: non-default branch push (any flaw fails) and
                 // change request to default branch (policy gate)
                 // -------------------------------------------------------------
                 stage('Pipeline Scan') {
                     when {
                         anyOf {
-                            expression { !env.CHANGE_ID && env.BRANCH_NAME?.startsWith('feature/') }
+                            expression { !env.CHANGE_ID && !env.TAG_NAME && env.BRANCH_NAME && env.BRANCH_NAME != env.DEFAULT_BRANCH }
                             expression { env.CHANGE_ID && env.CHANGE_TARGET == env.DEFAULT_BRANCH }
                         }
                     }
@@ -136,7 +141,7 @@ pipeline {
                                 unzip -o pipeline-scan-LATEST.zip pipeline-scan.jar
 
                                 # Change request: evaluate findings against a Veracode policy
-                                # feature:        no fail criteria, every flaw counts
+                                # branch:         no fail criteria, every flaw counts
                                 if [ -n "$CHANGE_ID" ]; then
                                     GATE_POLICY="$PR_GATE_POLICY"
                                     echo "Gate: policy '$GATE_POLICY'"

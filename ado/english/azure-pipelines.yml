@@ -10,24 +10,23 @@
 #
 # Scan selection:
 #   push to default branch          -> Policy Scan (all artifacts, one upload)
-#   push to feature/*               -> Pipeline Scan (fails on any flaw)
+#   push to any other branch        -> Pipeline Scan (fails on any flaw)
 #   pull request to default branch  -> Pipeline Scan (policy gate)
-#   all of the above                -> Agent-based SCA (non-blocking)
+#   all of the above                -> IaC scan + Agent-based SCA (non-blocking)
 #
 # Pull request triggers:
 #   Azure Repos Git: "pr:" is ignored. Add this pipeline as a Build Validation
 #                    branch policy on the default branch.
 #   GitHub / Bitbucket Cloud: the "pr:" block below applies.
 #
-# If your default branch is not "main", update DEFAULT_BRANCH and both
-# branch filters below.
+# CI runs on every branch. If your default branch is not "main", update
+# DEFAULT_BRANCH and the "pr:" filter below.
 # =============================================================================
 
 trigger:
   branches:
     include:
-      - main
-      - feature/*
+      - '*'
 
 pr:
   branches:
@@ -49,11 +48,11 @@ stages:
   # PACKAGE: Veracode CLI autopackager
   # ===========================================================================
   - stage: Package
-    displayName: Package
+    displayName: Package Artifacts
     condition: ne(variables['System.PullRequest.IsFork'], 'True')
     jobs:
       - job: Autopackage
-        displayName: Veracode CLI autopackager
+        displayName: Autopackager
         steps:
           - checkout: self
 
@@ -78,6 +77,14 @@ stages:
               cat artifact_list.txt
             displayName: Install CLI and package
 
+          - script: |
+              # Static scan of the checked-out files: IaC misconfigurations and secrets
+              "$(Agent.TempDirectory)/veracode" scan --source "$(Build.SourcesDirectory)" --type directory --format table || echo "IaC scan completed"
+            displayName: Run IaC scan
+            env:
+              VERACODE_API_KEY_ID: $(VERACODE_API_ID)
+              VERACODE_API_KEY_SECRET: $(VERACODE_API_KEY)
+
           - task: PublishPipelineArtifact@1
             displayName: Publish packaged artifacts
             inputs:
@@ -93,17 +100,17 @@ stages:
     condition: ne(variables['System.PullRequest.IsFork'], 'True')
     jobs:
       - job: SCAScan
-        displayName: Veracode Agent-Based SCA
+        displayName: SCA scan
         steps:
           - checkout: self
           - script: |
               curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
-            displayName: Veracode SCA scan
+            displayName: Run SCA scan
             env:
               SRCCLR_API_TOKEN: $(SRCCLR_API_TOKEN)
 
   # ===========================================================================
-  # PIPELINE SCAN: feature/* push (any flaw fails) and PR (policy gate)
+  # PIPELINE SCAN: non-default branch push (any flaw fails) and PR (policy gate)
   # ===========================================================================
   - stage: PipelineScan
     displayName: Pipeline Scan
@@ -114,7 +121,8 @@ stages:
         or(
           and(
             ne(variables['Build.Reason'], 'PullRequest'),
-            startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+            startsWith(variables['Build.SourceBranch'], 'refs/heads/'),
+            ne(variables['Build.SourceBranch'], format('refs/heads/{0}', variables['DEFAULT_BRANCH']))
           ),
           and(
             eq(variables['Build.Reason'], 'PullRequest'),
@@ -124,7 +132,7 @@ stages:
       )
     jobs:
       - job: PipelineScanJob
-        displayName: Veracode Pipeline Scan (all artifacts)
+        displayName: Scan artifacts
         steps:
           - checkout: none
 
@@ -144,7 +152,7 @@ stages:
               unzip -o pipeline-scan-LATEST.zip pipeline-scan.jar
 
               # PR:      evaluate findings against a Veracode policy
-              # feature: no fail criteria, every flaw counts toward the exit code
+              # branch:  no fail criteria, every flaw counts toward the exit code
               GATE_ARGS=()
               if [ "$BUILD_REASON" = "PullRequest" ]; then
                 GATE_ARGS=(--policy_name "$PR_GATE_POLICY")
@@ -219,7 +227,7 @@ stages:
       )
     jobs:
       - job: PolicyScanJob
-        displayName: Veracode Policy Scan
+        displayName: Upload and scan
         steps:
           - checkout: none
 
@@ -264,7 +272,7 @@ stages:
                 -autoscan true \
                 -filepath verascan \
                 -version "$(Build.BuildNumber)-$(System.JobAttempt)"
-            displayName: Upload and Scan (Policy)
+            displayName: Run Upload and Scan
             workingDirectory: $(Pipeline.Workspace)/veracode
             env:
               VERACODE_API_ID: $(VERACODE_API_ID)

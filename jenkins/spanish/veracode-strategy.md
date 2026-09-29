@@ -15,9 +15,10 @@ Renombra el que uses a `Jenkinsfile` en la raiz de tu repositorio y crea un job 
 
 | Disparador | Stage | Producto Veracode | Gate |
 |------------|-------|-------------------|------|
-| Push a `feature/*` | `Pipeline Scan` | Pipeline Scan | Falla con cualquier hallazgo |
+| Push a cualquier rama que no es la por defecto | `Pipeline Scan` | Pipeline Scan | Falla con cualquier hallazgo |
 | Change request (PR) a la rama por defecto | `Pipeline Scan` | Pipeline Scan | Politica `Veracode Recommended Very High` |
 | Push a la rama por defecto | `Policy Scan` | Policy Scan | Politica de la plataforma |
+| Todos los anteriores | `Empaquetar Artefactos` | Escaneo IaC (Veracode CLI) | No bloqueante |
 | Todos los anteriores | `SCA Basado en Agente` | SCA basado en agente | No bloqueante |
 
 Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` sin hallazgos, `1-200` cantidad de hallazgos que cumplen el criterio, `253-255` timeout o error. Cualquier codigo distinto de cero falla el stage.
@@ -32,14 +33,14 @@ Build (Maven) -> Empaquetar Artefactos (stash "verascan")
          +---------------+----------------+
          |               |                |
   SCA Basado en     Pipeline Scan     Policy Scan
-  Agente (siempre)  push feature/*    push a DEFAULT_BRANCH
+  Agente (siempre)  push a otra rama  push a DEFAULT_BRANCH
                     o CR a la rama
                     por defecto
 ```
 
 | Stage | Condicion `when` |
 |-------|------------------|
-| `Pipeline Scan` | `!CHANGE_ID && BRANCH_NAME.startsWith('feature/')`, o `CHANGE_ID && CHANGE_TARGET == DEFAULT_BRANCH` |
+| `Pipeline Scan` | `!CHANGE_ID && !TAG_NAME && BRANCH_NAME != DEFAULT_BRANCH`, o `CHANGE_ID && CHANGE_TARGET == DEFAULT_BRANCH` |
 | `Policy Scan` | `!CHANGE_ID && BRANCH_NAME == DEFAULT_BRANCH` |
 
 `BRANCH_NAME`, `CHANGE_ID` y `CHANGE_TARGET` los definen los jobs Multibranch Pipeline. En un job Pipeline simple estan vacias, asi que solo corre SCA.
@@ -106,9 +107,20 @@ En multibranch `JOB_NAME` es `<carpeta>/<repo>/<rama>`. Se quita el ultimo segme
 
 No bloqueante en ambos: Linux ignora errores con `|| echo`, Windows usa `powershell(returnStatus: true)`.
 
+### Escaneo IaC
+
+Corre en `Empaquetar Artefactos`, justo despues de instalar el CLI, asi escanea los archivos del repositorio y no una salida de build:
+
+| Agente | Comando |
+|--------|---------|
+| Linux | `./veracode scan --source . --type directory --format table` |
+| Windows | `& $veracode scan --source . --type directory --format table` |
+
+Es el [escaneo de contenedores, IaC y secretos](https://docs.veracode.com/r/veracode_scan) del Veracode CLI. Ambos agentes definen `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET` a partir de las credenciales existentes, que son las que lee el CLI. No bloqueante en ambos: Linux ignora errores con `|| echo`, Windows solo registra el codigo de salida.
+
 ### Pipeline Scan
 
-Cada artefacto se escanea por separado, el ciclo continua despues de un fallo y el stage falla al final si algun artefacto fallo. Los change requests agregan `--policy_name "$PR_GATE_POLICY"`; los push a feature no agregan argumentos de gate. `scan_results/` se archiva incluso si falla.
+Cada artefacto se escanea por separado, el ciclo continua despues de un fallo y el stage falla al final si algun artefacto fallo. Los change requests agregan `--policy_name "$PR_GATE_POLICY"`; los push a rama no agregan argumentos de gate. `scan_results/` se archiva incluso si falla.
 
 ### Policy Scan
 
@@ -118,7 +130,8 @@ Descarga el ultimo [Veracode Java API Wrapper](https://docs.veracode.com/r/c_abo
 
 ## Notas de Comportamiento
 
-- **Builds duplicados**: con un branch source que descubre ramas y PRs, un push a `feature/x` con un PR abierto construye `feature/x` (gate de cualquier hallazgo) y `PR-n` (gate de politica). Usa el build del PR como status check requerido.
+- **Builds duplicados**: con un branch source que descubre ramas y PRs, un push a una rama con un PR abierto construye esa rama (gate de cualquier hallazgo) y `PR-n` (gate de politica). Usa el build del PR como status check requerido.
+- **Tags**: si tu branch source descubre tags, `!env.TAG_NAME` mantiene los builds de tag fuera del gate de rama.
 - **`disableConcurrentBuilds()`** aplica por job de rama, asi un policy scan en `main` nunca se superpone con otro build de `main`.
 
 ---
@@ -127,9 +140,9 @@ Descarga el ultimo [Veracode Java API Wrapper](https://docs.veracode.com/r/c_abo
 
 **Cambiar la politica del gate de PR**: edita `PR_GATE_POLICY`. Para una politica personalizada, descargala con `--request_policy` y usa `--policy_file` ([parametros](https://docs.veracode.com/r/r_pipeline_scan_commands)).
 
-**Relajar el gate de feature**: agrega `--fail_on_severity "Very High, High"` a la rama sin politica del comando de escaneo.
+**Relajar el gate de rama**: agrega `--fail_on_severity "Very High, High"` a la rama sin politica del comando de escaneo.
 
-**Escanear todas las ramas que no son la por defecto**: cambia la expresion de feature a `!env.CHANGE_ID && env.BRANCH_NAME != env.DEFAULT_BRANCH`.
+**Limitar que ramas se escanean**: restringe la expresion de rama, por ejemplo `env.BRANCH_NAME.startsWith('feature/')`, o usa los filtros de descubrimiento del branch source en la configuracion del job.
 
 ---
 

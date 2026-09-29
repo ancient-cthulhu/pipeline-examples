@@ -9,14 +9,14 @@
 #   VERACODE_APP_NAME   Nombre del perfil de aplicacion (por defecto: nombre del proyecto CodeBuild)
 #   DEFAULT_BRANCH      Rama por defecto         (por defecto: main)
 #   BRANCH_NAME         Rama cuando lo inicia CodePipeline (sin variables de webhook)
-#   SCAN_MODE           Forzar un modo: policy | feature | pr | skip
+#   SCAN_MODE           Forzar un modo: policy | branch | pr | skip
 #
 # Seleccion de escaneo (se resuelve al inicio de la fase build):
 #   push a la rama por defecto (webhook PUSH)        -> Policy Scan
-#   push a feature/*           (webhook PUSH)        -> Pipeline Scan (falla con cualquier hallazgo)
+#   push a cualquier otra rama (webhook PUSH)        -> Pipeline Scan (falla con cualquier hallazgo)
 #   PR a la rama por defecto   (webhook PULL_REQUEST_*) -> Pipeline Scan (gate de politica)
 #   cualquier otro caso                              -> skip
-#   SCA corre siempre que corre un escaneo (no bloqueante)
+#   El escaneo IaC y SCA corren siempre que corre un escaneo (no bloqueante)
 #
 # Filter groups del webhook: ver veracode-strategy.md.
 # =============================================================================
@@ -57,13 +57,17 @@ phases:
                 SCAN_MODE=skip
               fi
               ;;
+            # Los push de tags no son builds de rama
+            tag/*)
+              SCAN_MODE=skip
+              ;;
             *)
               BRANCH="${TRIGGER#branch/}"
               BRANCH="${BRANCH:-${BRANCH_NAME:-}}"
               case "$BRANCH" in
                 "$DEFAULT_BRANCH") SCAN_MODE=policy ;;
-                feature/*)         SCAN_MODE=feature ;;
-                *)                 SCAN_MODE=skip ;;
+                "")                SCAN_MODE=skip ;;
+                *)                 SCAN_MODE=branch ;;
               esac
               ;;
           esac
@@ -97,6 +101,16 @@ phases:
         fi
 
       # -----------------------------------------------------------------------
+      # ESCANEO IaC: escaneo estatico de los archivos del repo (IaC y secretos)
+      # -----------------------------------------------------------------------
+      - |
+        if [ "$SCAN_MODE" != "skip" ]; then
+          export VERACODE_API_KEY_ID="$VERACODE_API_ID"
+          export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
+          ./veracode scan --source . --type directory --format table || echo "Escaneo IaC completado"
+        fi
+
+      # -----------------------------------------------------------------------
       # SCA: SCA basado en agente (no bloqueante)
       # -----------------------------------------------------------------------
       - |
@@ -105,10 +119,10 @@ phases:
         fi
 
       # -----------------------------------------------------------------------
-      # PIPELINE SCAN: feature (falla con cualquier hallazgo) y pr (gate de politica)
+      # PIPELINE SCAN: branch (falla con cualquier hallazgo) y pr (gate de politica)
       # -----------------------------------------------------------------------
       - |
-        if [ "$SCAN_MODE" = "feature" ] || [ "$SCAN_MODE" = "pr" ]; then
+        if [ "$SCAN_MODE" = "branch" ] || [ "$SCAN_MODE" = "pr" ]; then
           curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
           unzip -o pipeline-scan-LATEST.zip pipeline-scan.jar
 

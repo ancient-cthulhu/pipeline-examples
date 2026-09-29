@@ -9,14 +9,14 @@
 #   VERACODE_APP_NAME   Application profile name (default: CodeBuild project name)
 #   DEFAULT_BRANCH      Default branch name      (default: main)
 #   BRANCH_NAME         Branch name when started by CodePipeline (no webhook vars)
-#   SCAN_MODE           Force a mode: policy | feature | pr | skip
+#   SCAN_MODE           Force a mode: policy | branch | pr | skip
 #
 # Scan selection (resolved at the start of the build phase):
 #   push to default branch   (webhook PUSH)          -> Policy Scan
-#   push to feature/*        (webhook PUSH)          -> Pipeline Scan (fails on any flaw)
+#   push to any other branch (webhook PUSH)          -> Pipeline Scan (fails on any flaw)
 #   PR to default branch     (webhook PULL_REQUEST_*) -> Pipeline Scan (policy gate)
 #   anything else                                     -> skip
-#   SCA runs whenever a scan runs (non-blocking)
+#   IaC scan and SCA run whenever a scan runs (non-blocking)
 #
 # Webhook filter groups: see veracode-strategy.md.
 # =============================================================================
@@ -57,13 +57,17 @@ phases:
                 SCAN_MODE=skip
               fi
               ;;
+            # Tag pushes are not branch builds
+            tag/*)
+              SCAN_MODE=skip
+              ;;
             *)
               BRANCH="${TRIGGER#branch/}"
               BRANCH="${BRANCH:-${BRANCH_NAME:-}}"
               case "$BRANCH" in
                 "$DEFAULT_BRANCH") SCAN_MODE=policy ;;
-                feature/*)         SCAN_MODE=feature ;;
-                *)                 SCAN_MODE=skip ;;
+                "")                SCAN_MODE=skip ;;
+                *)                 SCAN_MODE=branch ;;
               esac
               ;;
           esac
@@ -97,6 +101,16 @@ phases:
         fi
 
       # -----------------------------------------------------------------------
+      # IaC SCAN: static scan of the checked-out files (IaC and secrets)
+      # -----------------------------------------------------------------------
+      - |
+        if [ "$SCAN_MODE" != "skip" ]; then
+          export VERACODE_API_KEY_ID="$VERACODE_API_ID"
+          export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
+          ./veracode scan --source . --type directory --format table || echo "IaC scan completed"
+        fi
+
+      # -----------------------------------------------------------------------
       # SCA: Agent-based SCA (non-blocking)
       # -----------------------------------------------------------------------
       - |
@@ -105,10 +119,10 @@ phases:
         fi
 
       # -----------------------------------------------------------------------
-      # PIPELINE SCAN: feature (any flaw fails) and pr (policy gate)
+      # PIPELINE SCAN: branch (any flaw fails) and pr (policy gate)
       # -----------------------------------------------------------------------
       - |
-        if [ "$SCAN_MODE" = "feature" ] || [ "$SCAN_MODE" = "pr" ]; then
+        if [ "$SCAN_MODE" = "branch" ] || [ "$SCAN_MODE" = "pr" ]; then
           curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
           unzip -o pipeline-scan-LATEST.zip pipeline-scan.jar
 

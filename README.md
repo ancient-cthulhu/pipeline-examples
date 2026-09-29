@@ -8,16 +8,17 @@ Reference CI/CD pipelines for Veracode Static Analysis and SCA. Every platform i
 
 | Trigger | Scan | Gate | Purpose |
 |---------|------|------|---------|
-| Push to `feature/**` | Pipeline Scan | Fails on any flaw | Fast developer feedback |
+| Push to any non-default branch | Pipeline Scan | Fails on any flaw | Fast developer feedback |
 | Pull/Merge Request to default branch | Pipeline Scan | `Veracode Recommended Very High` policy | Prove the change is safe to merge |
 | Push to default branch | Policy Scan (Upload and Scan) | Platform policy | Compliance record in the Veracode Platform |
+| All of the above | IaC scan (Veracode CLI) | Non-blocking | Misconfigurations and secrets in the checked-out files |
 | All of the above | Agent-Based SCA | Non-blocking | Third-party dependency analysis |
 
 Pipeline Scan exit codes: `0` no flaws, `1-200` flaws matching the criteria, `253-255` timeout or error ([status codes](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)).
 
 Common flow on every platform:
 
-1. **Package**: Veracode CLI autopackager (`veracode package --trust`) builds scannable artifacts into `verascan/`.
+1. **Package**: Veracode CLI autopackager (`veracode package --trust`) builds scannable artifacts into `verascan/`, and `veracode scan --type directory` statically scans the checked-out files for IaC misconfigurations and secrets.
 2. **Pipeline Scan**: each artifact scanned separately, results kept, job fails if any artifact fails.
 3. **Policy Scan**: Java API Wrapper `UploadAndScan` uploads the whole `verascan/` folder as one build.
 
@@ -25,14 +26,14 @@ Common flow on every platform:
 
 ## Available Implementations
 
-| Platform | Folder | English | Spanish |
-|----------|--------|---------|---------|
-| GitHub Actions | [`github-actions/`](./github-actions) | Yes | Yes |
-| GitLab CI/CD | [`gitlab/`](./gitlab) | Yes | Yes |
-| Bitbucket Pipelines | [`bitbucket/`](./bitbucket) | Yes | Yes |
-| Azure DevOps | [`ado/`](./ado) | Yes | Yes |
-| AWS CodeBuild | [`aws/`](./aws) | Yes | Yes |
-| Jenkins (Linux, Windows) | [`jenkins/`](./jenkins) | Yes | Yes |
+| Platform | Folder | English | Spanish | Updated to new strategy |
+|----------|--------|---------|---------|-------------------------|
+| GitHub Actions | [`github-actions/`](./github-actions) | Yes | Yes | Yes |
+| GitLab CI/CD | [`gitlab/`](./gitlab) | Yes | Yes | Yes |
+| Bitbucket Pipelines | [`bitbucket/`](./bitbucket) | Yes | Yes | Yes |
+| Azure DevOps | [`ado/`](./ado) | Yes | Yes | Yes |
+| AWS CodeBuild | [`aws/`](./aws) | Yes | Yes | Yes |
+| Jenkins (Linux, Windows) | [`jenkins/`](./jenkins) | Yes | Yes | Yes |
 
 Each language folder contains the pipeline file and a `veracode-strategy.md` with setup, job details, customization, and troubleshooting.
 

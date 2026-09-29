@@ -15,9 +15,10 @@ Rename the one you use to `Jenkinsfile` in your repository root and create a **M
 
 | Trigger | Stage | Veracode Product | Gate |
 |---------|-------|------------------|------|
-| Push to `feature/*` | `Pipeline Scan` | Pipeline Scan | Fails on any flaw |
+| Push to any non-default branch | `Pipeline Scan` | Pipeline Scan | Fails on any flaw |
 | Change request (PR) to default branch | `Pipeline Scan` | Pipeline Scan | `Veracode Recommended Very High` policy |
 | Push to default branch | `Policy Scan` | Policy Scan | Platform policy |
+| All of the above | `Package Artifacts` | IaC scan (Veracode CLI) | Non-blocking |
 | All of the above | `Agent-Based SCA` | Agent-Based SCA | Non-blocking |
 
 Pipeline Scan exit codes ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` no flaws, `1-200` number of flaws that matched the criteria, `253-255` timeout or error. Any non-zero code fails the stage.
@@ -32,13 +33,13 @@ Build (Maven) -> Package Artifacts (stash "verascan")
          +---------------+----------------+
          |               |                |
   Agent-Based SCA   Pipeline Scan     Policy Scan
-  (always)          feature/* push    push to DEFAULT_BRANCH
+  (always)          non-default push  push to DEFAULT_BRANCH
                     or CR to default
 ```
 
 | Stage | `when` condition |
 |-------|------------------|
-| `Pipeline Scan` | `!CHANGE_ID && BRANCH_NAME.startsWith('feature/')`, or `CHANGE_ID && CHANGE_TARGET == DEFAULT_BRANCH` |
+| `Pipeline Scan` | `!CHANGE_ID && !TAG_NAME && BRANCH_NAME != DEFAULT_BRANCH`, or `CHANGE_ID && CHANGE_TARGET == DEFAULT_BRANCH` |
 | `Policy Scan` | `!CHANGE_ID && BRANCH_NAME == DEFAULT_BRANCH` |
 
 `BRANCH_NAME`, `CHANGE_ID`, and `CHANGE_TARGET` are set by Multibranch Pipeline jobs. In a plain Pipeline job they are empty, so only SCA runs.
@@ -105,9 +106,20 @@ Multibranch `JOB_NAME` is `<folder>/<repo>/<branch>`. The last segment is remove
 
 Non-blocking on both: Linux swallows errors with `|| echo`, Windows uses `powershell(returnStatus: true)`.
 
+### IaC scan
+
+Runs in `Package Artifacts`, right after the CLI is installed, so it scans the checked-out files rather than a build output:
+
+| Agent | Command |
+|-------|---------|
+| Linux | `./veracode scan --source . --type directory --format table` |
+| Windows | `& $veracode scan --source . --type directory --format table` |
+
+This is the Veracode CLI [container, IaC, and secrets scan](https://docs.veracode.com/r/veracode_scan). Both agents set `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET` from the existing credentials, which is what the CLI reads. Non-blocking on both: Linux swallows errors with `|| echo`, Windows only logs the exit code.
+
 ### Pipeline Scan
 
-Each artifact is scanned separately, the loop continues after a failure, and the stage fails at the end if any artifact failed. Change requests add `--policy_name "$PR_GATE_POLICY"`; feature pushes add no gate arguments. `scan_results/` is archived even on failure.
+Each artifact is scanned separately, the loop continues after a failure, and the stage fails at the end if any artifact failed. Change requests add `--policy_name "$PR_GATE_POLICY"`; branch pushes add no gate arguments. `scan_results/` is archived even on failure.
 
 ### Policy Scan
 
@@ -117,7 +129,8 @@ Downloads the latest [Veracode Java API Wrapper](https://docs.veracode.com/r/c_a
 
 ## Behavior Notes
 
-- **Duplicate builds**: with a branch source that discovers both branches and PRs, a push to `feature/x` with an open PR builds both `feature/x` (any-flaw gate) and `PR-n` (policy gate). Use the PR build as the required status check.
+- **Duplicate builds**: with a branch source that discovers both branches and PRs, a push to a branch with an open PR builds both that branch (any-flaw gate) and `PR-n` (policy gate). Use the PR build as the required status check.
+- **Tags**: if your branch source discovers tags, `!env.TAG_NAME` keeps tag builds out of the branch gate.
 - **`disableConcurrentBuilds()`** applies per branch job, so a policy scan on `main` never overlaps with another `main` build.
 
 ---
@@ -126,9 +139,9 @@ Downloads the latest [Veracode Java API Wrapper](https://docs.veracode.com/r/c_a
 
 **Change the PR gate policy**: edit `PR_GATE_POLICY`. For a custom policy, download it with `--request_policy` and use `--policy_file` ([parameters](https://docs.veracode.com/r/r_pipeline_scan_commands)).
 
-**Relax the feature gate**: add `--fail_on_severity "Very High, High"` to the no-policy branch of the scan command.
+**Relax the branch gate**: add `--fail_on_severity "Very High, High"` to the no-policy branch of the scan command.
 
-**Scan every non-default branch**: change the feature expression to `!env.CHANGE_ID && env.BRANCH_NAME != env.DEFAULT_BRANCH`.
+**Limit which branches are scanned**: narrow the branch expression, for example `env.BRANCH_NAME.startsWith('feature/')`, or use the branch source's discovery filters in the job configuration.
 
 ---
 

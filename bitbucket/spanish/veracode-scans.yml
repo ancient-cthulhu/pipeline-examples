@@ -11,13 +11,13 @@
 #   VERACODE_APP_NAME   Nombre del perfil de aplicacion (por defecto: {workspace}/{repo})
 #
 # Seleccion de escaneo (condiciones de inicio nativas, "triggers:" al final):
-#   push a la rama por defecto   -> veracode-policy   (Policy Scan)
-#   push a feature/**            -> veracode-feature  (Pipeline Scan, falla con cualquier hallazgo)
+#   push a la rama por defecto   -> branches: main   (Policy Scan)
+#   push a cualquier otra rama   -> default           (Pipeline Scan, falla con cualquier hallazgo)
 #   PR a la rama por defecto     -> veracode-pr       (Pipeline Scan, gate de politica)
-#   todos los anteriores         -> SCA basado en agente (no bloqueante)
+#   todos los anteriores         -> Escaneo IaC + SCA basado en agente (no bloqueante)
 #
 # Bitbucket no expone la rama por defecto como variable. Si la tuya no es
-# "main", actualiza las dos condiciones en "triggers:".
+# "main", actualiza el selector "main:" y la condicion en "triggers:".
 # =============================================================================
 
 image: maven:3.9-eclipse-temurin-17
@@ -33,6 +33,11 @@ definitions:
           - apt-get update -qq && apt-get install -y -qq unzip >/dev/null
           - curl -fsS https://tools.veracode.com/veracode-cli/install | sh
           - ./veracode version
+          # Escaneo estatico de los archivos del repo: errores de configuracion IaC y secretos
+          - |
+            export VERACODE_API_KEY_ID="$VERACODE_API_ID"
+            export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
+            ./veracode scan --source . --type directory --format table || echo "Escaneo IaC completado"
           - mkdir -p verascan
           - ./veracode package --source . --output verascan --trust
           - ls -lhR verascan
@@ -57,13 +62,14 @@ definitions:
           - curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
 
     # -------------------------------------------------------------------------
-    # PIPELINE SCAN (feature): sin criterio de fallo, cada hallazgo cuenta
+    # PIPELINE SCAN (rama): sin criterio de fallo, cada hallazgo cuenta
     # -------------------------------------------------------------------------
-    - step: &pipeline-scan-feature
-        name: Pipeline Scan (feature)
+    - step: &pipeline-scan-branch
+        name: Pipeline Scan (rama)
         script:
-          - GATE_POLICY=""
-          - echo "Gate - falla con cualquier hallazgo"
+          - |
+            GATE_POLICY=""
+            echo "Gate: falla con cualquier hallazgo"
           - &pipeline_scan_loop |
             apt-get update -qq && apt-get install -y -qq unzip >/dev/null
             curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
@@ -119,8 +125,9 @@ definitions:
     - step: &pipeline-scan-pr
         name: Pipeline Scan (gate PR)
         script:
-          - GATE_POLICY="Veracode Recommended Very High"
-          - echo "Gate - politica $GATE_POLICY"
+          - |
+            GATE_POLICY="Veracode Recommended Very High"
+            echo "Gate: politica '$GATE_POLICY'"
           - *pipeline_scan_loop
         artifacts:
           - scan_results/**
@@ -150,8 +157,9 @@ definitions:
               exit 1
             fi
             cp "$JAR" VeracodeJavaAPI.jar
-          - APP_NAME="${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}"
-          - echo "Perfil de Aplicacion Veracode - $APP_NAME"
+          - |
+            APP_NAME="${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}"
+            echo "Perfil de Aplicacion Veracode: $APP_NAME"
           - |
             java -jar VeracodeJavaAPI.jar \
               -vid "$VERACODE_API_ID" \
@@ -164,24 +172,28 @@ definitions:
               -version "${BITBUCKET_BRANCH}-${BITBUCKET_BUILD_NUMBER}-$(date +%Y%m%d%H%M%S)"
 
 # =============================================================================
-# PIPELINES (custom, iniciados por los triggers de abajo)
+# PIPELINES (condiciones de inicio)
 # =============================================================================
 pipelines:
-  custom:
-    veracode-policy:
+  # Push a la rama por defecto -> Policy Scan
+  branches:
+    main:
       - step: *package
       - parallel:
           steps:
             - step: *sca
             - step: *policy-scan
 
-    veracode-feature:
-      - step: *package
-      - parallel:
-          steps:
-            - step: *sca
-            - step: *pipeline-scan-feature
+  # Push a cualquier otra rama -> Pipeline Scan. "default" excluye los push de tags.
+  default:
+    - step: *package
+    - parallel:
+        steps:
+          - step: *sca
+          - step: *pipeline-scan-branch
 
+  # Iniciado por el trigger pullrequest-push de abajo
+  custom:
     veracode-pr:
       - step: *package
       - parallel:
@@ -190,16 +202,9 @@ pipelines:
             - step: *pipeline-scan-pr
 
 # =============================================================================
-# TRIGGERS (condiciones de inicio)
+# TRIGGERS (pull requests, filtrados por rama destino)
 # =============================================================================
 triggers:
-  repository-push:
-    - condition: BITBUCKET_BRANCH == "main"
-      pipelines:
-        - veracode-policy
-    - condition: glob(BITBUCKET_BRANCH, "feature/**")
-      pipelines:
-        - veracode-feature
   pullrequest-push:
     - condition: BITBUCKET_PR_DESTINATION_BRANCH == "main"
       pipelines:

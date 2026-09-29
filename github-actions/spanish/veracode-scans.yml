@@ -11,18 +11,18 @@ name: CI - Veracode
 #
 # Seleccion de escaneo:
 #   push a la rama por defecto      -> Policy Scan (todos los artefactos, una carga)
-#   push a feature/**               -> Pipeline Scan (falla con cualquier hallazgo)
+#   push a cualquier otra rama      -> Pipeline Scan (falla con cualquier hallazgo)
 #   pull_request a rama por defecto -> Pipeline Scan (gate de politica)
-#   todos los anteriores            -> SCA basado en agente (no bloqueante)
+#   todos los anteriores            -> Escaneo IaC + SCA basado en agente (no bloqueante)
 #
-# Si tu rama por defecto no es "main", actualiza los filtros de ramas en "on:".
-# Las condiciones de los jobs resuelven la rama por defecto dinamicamente.
+# El push corre en todas las ramas. Las condiciones de los jobs resuelven la
+# rama por defecto dinamicamente. El filtro de pull_request no acepta
+# expresiones, asi que si tu rama por defecto no es "main", actualizalo en "on:".
 
 on:
   push:
     branches:
-      - main
-      - 'feature/**'
+      - '**'
   pull_request:
     branches:
       - main
@@ -70,6 +70,13 @@ jobs:
           curl -fsS https://tools.veracode.com/veracode-cli/install | sh
           ./veracode version
 
+      - name: Ejecutar Escaneo IaC de Veracode
+        run: |
+          # Escaneo estatico de los archivos del repo: errores de configuracion IaC y secretos
+          export VERACODE_API_KEY_ID="$VERACODE_API_ID"
+          export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
+          ./veracode scan --source . --type directory --format table || echo "Escaneo IaC completado"
+
       - name: Ejecutar Autopackager de Veracode
         run: |
           mkdir -p verascan
@@ -112,7 +119,7 @@ jobs:
           curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "Escaneo SCA completado"
 
   # ===========================================================================
-  # PIPELINE SCAN: push a feature/** (falla con cualquier hallazgo) y PR (gate de politica)
+  # PIPELINE SCAN: push a rama que no es la por defecto (falla con cualquier hallazgo) y PR (gate de politica)
   # ===========================================================================
   pipeline-scan:
     name: Pipeline Scan
@@ -132,12 +139,12 @@ jobs:
           curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
           unzip -o pipeline-scan-LATEST.zip pipeline-scan.jar
 
-      - name: Ejecutar Pipeline Scan (todos los artefactos)
+      - name: Ejecutar Pipeline Scan
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           # PR:      evalua los hallazgos contra una politica de Veracode
-          # feature: sin criterio de fallo, cada hallazgo cuenta en el codigo de salida
+          # rama: sin criterio de fallo, cada hallazgo cuenta en el codigo de salida
           GATE_ARGS=()
           if [ "$EVENT_NAME" = "pull_request" ]; then
             GATE_ARGS=(--policy_name "$PR_GATE_POLICY")
@@ -197,7 +204,7 @@ jobs:
   # POLICY SCAN: push a la rama por defecto
   # ===========================================================================
   policy-scan:
-    name: Policy Scan (rama por defecto)
+    name: Policy Scan
     needs: package
     if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
@@ -226,7 +233,7 @@ jobs:
           fi
           cp "$JAR" VeracodeJavaAPI.jar
 
-      - name: Subir y Escanear (Politica)
+      - name: Subir y Escanear
         env:
           APP_NAME: ${{ needs.package.outputs.app_name }}
           SCAN_VERSION: ${{ github.ref_name }}-${{ github.run_number }}-${{ github.run_attempt }}

@@ -10,9 +10,10 @@ Archivo del pipeline: [`azure-pipelines.yml`](./azure-pipelines.yml). Colocalo e
 
 | Disparador | Stage | Producto Veracode | Gate |
 |------------|-------|-------------------|------|
-| Push a `feature/*` | `PipelineScan` | Pipeline Scan | Falla con cualquier hallazgo |
+| Push a cualquier rama que no es la por defecto | `PipelineScan` | Pipeline Scan | Falla con cualquier hallazgo |
 | Pull request a la rama por defecto | `PipelineScan` | Pipeline Scan | Politica `Veracode Recommended Very High` |
 | Push a la rama por defecto | `PolicyScan` | Policy Scan | Politica de la plataforma |
+| Todos los anteriores | `Package` | Escaneo IaC (Veracode CLI) | No bloqueante |
 | Todos los anteriores | `SCA` | SCA basado en agente | No bloqueante |
 
 Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` sin hallazgos, `1-200` cantidad de hallazgos que cumplen el criterio, `253-255` timeout o error. Cualquier codigo distinto de cero falla el stage.
@@ -22,7 +23,7 @@ Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_
 ## Estructura del Pipeline
 
 ```text
-trigger: main, feature/*        pr: main (solo GitHub/Bitbucket)
+trigger: todas las ramas        pr: main (solo GitHub/Bitbucket)
                  |
      +-----------+------------+
      |                        |
@@ -31,7 +32,7 @@ trigger: main, feature/*        pr: main (solo GitHub/Bitbucket)
      +-----------------------------+
      |                             |
   PipelineScan                 PolicyScan
-  push feature/*: cualquier    push a DEFAULT_BRANCH:
+  push a otra rama: cualquier  push a DEFAULT_BRANCH:
   hallazgo falla               UploadAndScan
   PR a DEFAULT_BRANCH: politica
 ```
@@ -39,7 +40,7 @@ trigger: main, feature/*        pr: main (solo GitHub/Bitbucket)
 | Stage | Condicion |
 |-------|-----------|
 | `Package`, `SCA` | No es un PR desde fork (`System.PullRequest.IsFork`) |
-| `PipelineScan` | Build que no es PR en `refs/heads/feature/*`, o PR cuyo `System.PullRequest.TargetBranch` es `DEFAULT_BRANCH` |
+| `PipelineScan` | Build que no es PR en cualquier `refs/heads/*` distinto de `DEFAULT_BRANCH`, o PR cuyo `System.PullRequest.TargetBranch` es `DEFAULT_BRANCH` |
 | `PolicyScan` | Build que no es PR en `refs/heads/<DEFAULT_BRANCH>` |
 
 La validacion del destino del PR acepta `main` y `refs/heads/main`, asi funciona sin importar el formato del proveedor del repositorio.
@@ -93,11 +94,21 @@ Mantener `artifact_list.txt` fuera de `verascan/` evita que se suba a la Platafo
 
 Ejecuta `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor` en paralelo con Package. Los errores se ignoran con `|| echo`. Quita ese sufijo para aplicar la politica de SCA.
 
+### Escaneo IaC
+
+Corre en `Package`, justo despues de instalar el CLI, asi escanea las fuentes del repositorio y no una salida de build:
+
+```bash
+veracode scan --source "$(Build.SourcesDirectory)" --type directory --format table
+```
+
+Es el [escaneo de contenedores, IaC y secretos](https://docs.veracode.com/r/veracode_scan) del Veracode CLI. El step mapea las credenciales a `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET`, que son las que lee el CLI. Los errores se ignoran con `|| echo`, asi nunca bloquea el build.
+
 ### PipelineScan
 
 - Valida que las credenciales tengan valores reales y no macros `$(VAR)` sin expandir.
 - Escanea cada artefacto por separado, continua despues de un fallo y falla el stage al final si algun artefacto fallo.
-- `Build.Reason == PullRequest` agrega `--policy_name "$(PR_GATE_POLICY)"`; los push a feature no agregan argumentos de gate.
+- `Build.Reason == PullRequest` agrega `--policy_name "$(PR_GATE_POLICY)"`; los push a rama no agregan argumentos de gate.
 - Publica `scan_results/` como `veracode-pipeline-scan-results-<intento>` incluso si falla.
 
 ### PolicyScan
@@ -115,9 +126,10 @@ Descarga el ultimo [Veracode Java API Wrapper](https://docs.veracode.com/r/c_abo
 
 ## Notas de Comportamiento
 
-- **Ejecuciones duplicadas (repos GitHub/Bitbucket)**: un push a `feature/x` con un PR abierto puede iniciar una ejecucion CI y una de PR. Usa la ejecucion del PR como check requerido.
+- **Ejecuciones duplicadas (repos GitHub/Bitbucket)**: un push a una rama con un PR abierto puede iniciar una ejecucion CI y una de PR. Usa la ejecucion del PR como check requerido.
 - **PRs desde forks**: se omiten, porque por defecto los secretos no se exponen a builds de forks.
-- **Ejecuciones manuales**: una ejecucion manual en `feature/*` se comporta como un push (Pipeline Scan, cualquier hallazgo falla). En la rama por defecto ejecuta el policy scan.
+- **Ejecuciones manuales**: una ejecucion manual en cualquier rama que no es la por defecto se comporta como un push (Pipeline Scan, cualquier hallazgo falla). En la rama por defecto ejecuta el policy scan.
+- **Tags**: la condicion de `PipelineScan` exige una ref `refs/heads/`, asi que un build de tag nunca llega al gate de rama.
 
 ---
 
@@ -125,13 +137,9 @@ Descarga el ultimo [Veracode Java API Wrapper](https://docs.veracode.com/r/c_abo
 
 **Cambiar la politica del gate de PR**: edita `PR_GATE_POLICY`. Para una politica personalizada, descargala con `--request_policy` y usa `--policy_file` ([parametros](https://docs.veracode.com/r/r_pipeline_scan_commands)).
 
-**Relajar el gate de feature**: define `GATE_ARGS=(--fail_on_severity "Very High, High")` en la rama `else`.
+**Relajar el gate de rama**: define `GATE_ARGS=(--fail_on_severity "Very High, High")` en la rama `else`.
 
-**Escanear todas las ramas que no son la por defecto**: define `trigger.branches.include` como `'*'` y cambia la condicion de feature a:
-
-```yaml
-ne(variables['Build.SourceBranch'], format('refs/heads/{0}', variables['DEFAULT_BRANCH']))
-```
+**Limitar que ramas se escanean**: reemplaza `'*'` en `trigger.branches.include` por una lista explicita, por ejemplo `main` y `feature/*`.
 
 ---
 

@@ -10,10 +10,11 @@ Buildspec: [`buildspec.yml`](./buildspec.yml). Place it in your repository root 
 
 | Trigger | Scan mode | Veracode Product | Gate |
 |---------|-----------|------------------|------|
-| Push to `feature/*` | `feature` | Pipeline Scan | Fails on any flaw |
+| Push to any non-default branch | `branch` | Pipeline Scan | Fails on any flaw |
 | Pull request to default branch | `pr` | Pipeline Scan | `Veracode Recommended Very High` policy |
 | Push to default branch | `policy` | Policy Scan | Platform policy |
 | Anything else | `skip` | none | Build passes without scanning |
+| Any scanning mode | | IaC scan (Veracode CLI) | Non-blocking |
 | Any scanning mode | | Agent-Based SCA | Non-blocking |
 
 Pipeline Scan exit codes ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` no flaws, `1-200` number of flaws that matched the criteria, `253-255` timeout or error. Any non-zero code fails the build.
@@ -28,7 +29,8 @@ The first `build` command sets `SCAN_MODE` from [CodeBuild webhook variables](ht
 |--------|-------|
 | `SCAN_MODE` already set | Used as-is (manual override) |
 | `CODEBUILD_WEBHOOK_TRIGGER=pr/<n>` | `pr` if `CODEBUILD_WEBHOOK_BASE_REF` is `refs/heads/$DEFAULT_BRANCH`, else `skip` |
-| `CODEBUILD_WEBHOOK_TRIGGER=branch/<name>` | `policy` for the default branch, `feature` for `feature/*`, else `skip` |
+| `CODEBUILD_WEBHOOK_TRIGGER=branch/<name>` | `policy` for the default branch, `branch` for anything else |
+| `CODEBUILD_WEBHOOK_TRIGGER=tag/<name>` | `skip`, tag pushes are not branch builds |
 | No webhook variables (CodePipeline, manual start) | Same branch logic using `BRANCH_NAME` |
 
 Mode resolution runs in the same phase as the scans because buildspec `0.2` shares one shell between commands.
@@ -60,7 +62,7 @@ API credentials: [Generate API credentials](https://docs.veracode.com/r/t_create
 | `VERACODE_APP_NAME` | CodeBuild project name | Application profile name |
 | `DEFAULT_BRANCH` | `main` | Default branch |
 | `BRANCH_NAME` | none | Branch when CodePipeline starts the build. Pass `#{SourceVariables.BranchName}` from the source action. |
-| `SCAN_MODE` | resolved | Force `policy`, `feature`, `pr`, or `skip` |
+| `SCAN_MODE` | resolved | Force `policy`, `branch`, `pr`, or `skip` |
 
 ### 3. Webhook filter groups (GitHub, GitHub Enterprise Server, Bitbucket sources)
 
@@ -68,7 +70,7 @@ Configure **Primary source webhook events** with two filter groups:
 
 | Group | `EVENT` | Additional filter |
 |-------|---------|-------------------|
-| 1 | `PUSH` | `HEAD_REF` = `^refs/heads/(main\|feature/.*)$` |
+| 1 | `PUSH` | `HEAD_REF` = `^refs/heads/.*$` (all branches) |
 | 2 | `PULL_REQUEST_CREATED, PULL_REQUEST_UPDATED, PULL_REQUEST_REOPENED` | `BASE_REF` = `^refs/heads/main$` |
 
 The buildspec still validates the trigger, so a looser filter only costs build minutes, it never runs the wrong scan.
@@ -81,9 +83,10 @@ The buildspec still validates the trigger, so a looser filter only costs build m
 
 1. **Resolve mode** and validate credentials (credentials are only required when a scan will run).
 2. **Package**: installs the Veracode CLI, runs `veracode package --source . --output verascan --trust`, writes `artifact_list.txt`, fails if empty.
-3. **SCA**: `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`, errors swallowed with `|| echo`.
-4. **Pipeline Scan** (`feature`/`pr`): each artifact scanned separately, failures aggregated, build fails at the end. `pr` adds `--policy_name "$PR_GATE_POLICY"`. Results go to `scan_results/`.
-5. **Policy Scan** (`policy`): latest [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers) `UploadAndScan` on `verascan/`, version `<default branch>-<CODEBUILD_BUILD_NUMBER>`.
+3. **IaC scan**: `veracode scan --source . --type directory --format table`, the CLI [container, IaC, and secrets scan](https://docs.veracode.com/r/veracode_scan) over the checked-out files. Authenticates with `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`; errors swallowed with `|| echo`.
+4. **SCA**: `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`, errors swallowed with `|| echo`.
+5. **Pipeline Scan** (`branch`/`pr`): each artifact scanned separately, failures aggregated, build fails at the end. `pr` adds `--policy_name "$PR_GATE_POLICY"`. Results go to `scan_results/`.
+6. **Policy Scan** (`policy`): latest [Java API Wrapper](https://docs.veracode.com/r/c_about_wrappers) `UploadAndScan` on `verascan/`, version `<default branch>-<CODEBUILD_BUILD_NUMBER>`.
 
 To keep Pipeline Scan results, add an `artifacts` section for `scan_results/**/*` and configure project artifacts (S3).
 
@@ -93,9 +96,9 @@ To keep Pipeline Scan results, add an `artifacts` section for `scan_results/**/*
 
 **Change the PR gate policy**: edit `PR_GATE_POLICY` under `env.variables`.
 
-**Relax the feature gate**: set `GATE_ARGS=(--fail_on_severity "Very High, High")` in the `else` branch.
+**Relax the branch gate**: set `GATE_ARGS=(--fail_on_severity "Very High, High")` in the `else` branch.
 
-**Scan every non-default branch**: change `feature/*)` to `*)` in the branch `case` and widen the `HEAD_REF` filter.
+**Limit which branches are scanned**: add explicit patterns before the `*)` arm of the branch `case` and narrow the `HEAD_REF` filter to match.
 
 **Parameter Store instead of Secrets Manager**: replace the block with `env.parameter-store` entries pointing to SecureString parameters.
 
@@ -108,6 +111,7 @@ To keep Pipeline Scan results, add an `artifacts` section for `scan_results/**/*
 | Build fails at startup with a Secrets Manager error | Secret name or JSON key mismatch, or missing `GetSecretValue` permission. |
 | Always `Scan mode: skip` from CodePipeline | `BRANCH_NAME` not passed to the CodeBuild action. |
 | PR build shows `skip` | PR target is not `DEFAULT_BRANCH`. |
+| Tag push shows `skip` | Expected: tag pushes are not branch builds. |
 | `No packaged artifacts found` | Build image lacks your toolchain. |
 | Pipeline Scan exits `255` | Invalid credentials, network block to `api.veracode.com`, or unsupported artifact. |
 | Pipeline Scan exits `253` or `254` | Scan timed out. Add `--timeout <minutes>` (max 60). |

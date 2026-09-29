@@ -10,9 +10,10 @@ Pipeline file: [`.gitlab-ci.yml`](./.gitlab-ci.yml). Copy it to the root of your
 
 | Trigger | Veracode Product | Gate | Purpose |
 |---------|------------------|------|---------|
-| Push to `feature/**` | Pipeline Scan | Fails on any flaw | Developer feedback on every push |
+| Push to any non-default branch | Pipeline Scan | Fails on any flaw | Developer feedback on every push |
 | Merge request to default branch | Pipeline Scan | `Veracode Recommended Very High` policy | Prove the MR is safe to merge |
 | Push to default branch | Policy Scan | Platform policy | Compliance record for the application profile |
+| All of the above | IaC scan (Veracode CLI) | Non-blocking | Misconfigurations and secrets in the checked-out files |
 | All of the above | Agent-Based SCA | Non-blocking (`allow_failure: true`) | Third-party dependency analysis |
 
 Pipeline Scan exit codes ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` no flaws, `1-200` number of flaws that matched the criteria, `253-255` timeout or error. Any non-zero code fails the job.
@@ -22,12 +23,12 @@ Pipeline Scan exit codes ([docs](https://docs.veracode.com/r/Pipeline_Scan_Statu
 ## Pipeline Structure
 
 ```text
-workflow:rules  (MR to default | push default | push feature/**)
+workflow:rules  (MR to default | push default | push any other branch)
                     |
    stage: package   +-- package (CLI autopackager, dotenv APP_NAME)
                     +-- sca     (needs: [], allow_failure)
                     |
-   stage: scan      +-- pipeline-scan  push feature/**: any flaw fails
+   stage: scan      +-- pipeline-scan  push non-default: any flaw fails
                     |                  MR: policy gate
                     +-- policy-scan    push default branch: UploadAndScan
 ```
@@ -44,8 +45,8 @@ workflow:rules  (MR to default | push default | push feature/**)
 1. MR pipeline whose target is `$CI_DEFAULT_BRANCH`: run.
 2. Any other MR pipeline: never.
 3. Push to `$CI_DEFAULT_BRANCH`: run. Evaluated before rule 4 so the policy scan still runs if the default branch is the source of an open MR.
-4. Branch push with an open MR (`$CI_OPEN_MERGE_REQUESTS`): never, the MR pipeline covers it. Note: this also applies when the open MR targets a non-default branch, so that feature branch gets no pipeline.
-5. Push to `feature/*` (regex `^feature\/`, matches nested names): run.
+4. Branch push with an open MR (`$CI_OPEN_MERGE_REQUESTS`): never, the MR pipeline covers it. Note: this also applies when the open MR targets a non-default branch, so that branch gets no pipeline.
+5. Push to any other branch (`$CI_COMMIT_BRANCH` is set): run. Tag pipelines leave `$CI_COMMIT_BRANCH` empty, so tags never match.
 
 ---
 
@@ -60,7 +61,7 @@ workflow:rules  (MR to default | push default | push feature/**)
 | `SRCCLR_API_TOKEN` | For SCA | Masked | Agent-based SCA token. SCA is skipped if unset |
 | `VERACODE_APP_NAME` | No | | Application profile name. Defaults to `$CI_PROJECT_PATH` |
 
-**Do not mark these variables Protected** unless `feature/*` is a protected branch pattern. Protected variables are only exposed to pipelines on protected branches and tags, so feature and MR pipelines would run with empty credentials.
+**Do not mark these variables Protected** unless every branch you scan is protected. Protected variables are only exposed to pipelines on protected branches and tags, so branch and MR pipelines would run with empty credentials.
 
 API credentials: [Generate API credentials](https://docs.veracode.com/r/t_create_api_creds). SCA token: [Create an SCA agent](https://docs.veracode.com/r/t_sc_cli_agent).
 
@@ -70,7 +71,17 @@ API credentials: [Generate API credentials](https://docs.veracode.com/r/t_create
 
 ### package
 
-Image `ubuntu:22.04`. Installs the Veracode CLI, runs `veracode package --source . --output verascan --trust`, writes every `.war`, `.jar`, `.zip` to `artifact_list.txt`, and fails if none exist. Exports `APP_NAME` through a `dotenv` report so downstream jobs receive it.
+Image `ubuntu:22.04`. Installs the Veracode CLI, runs the IaC scan (below), then `veracode package --source . --output verascan --trust`, writes every `.war`, `.jar`, `.zip` to `artifact_list.txt`, and fails if none exist. Exports `APP_NAME` through a `dotenv` report so downstream jobs receive it.
+
+### IaC scan
+
+Runs inside `package`, right after the CLI is installed, so it scans the checked-out files rather than a build output:
+
+```bash
+./veracode scan --source . --type directory --format table
+```
+
+This is the Veracode CLI [container, IaC, and secrets scan](https://docs.veracode.com/r/veracode_scan) pointed at the working directory. It authenticates with `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`, derived from the existing credentials. Errors are swallowed with `|| echo`, so it never blocks the build.
 
 ### sca
 
@@ -82,7 +93,7 @@ Scans each artifact separately, continues after failures, then fails the job if 
 
 | Pipeline source | Arguments added | Result |
 |-----------------|-----------------|--------|
-| `push` to `feature/**` | none | Every flaw counts, any finding fails the job |
+| `push` to a non-default branch | none | Every flaw counts, any finding fails the job |
 | `merge_request_event` | `--policy_name "$PR_GATE_POLICY"` | Only policy-violating flaws fail the job |
 
 Results are saved as job artifacts (`scan_results/<artifact>_results.json`, `when: always`, 1 month).
@@ -106,7 +117,7 @@ The job ends when the upload is accepted. Results appear in the Veracode Platfor
 ## Behavior Notes
 
 - **Default branch**: all rules use `$CI_DEFAULT_BRANCH`. No edits needed if your default is `master` or `develop`.
-- **MRs to other branches**: rule 2 blocks them. If a feature branch has an open MR to a non-default branch, rule 3 also blocks its push pipelines, so that branch gets no scan. Remove rule 3 if that matters for your flow (feature pushes and MRs will then both run).
+- **MRs to other branches**: rule 2 blocks them. If a branch has an open MR to a non-default branch, rule 3 also blocks its push pipelines, so that branch gets no scan. Remove rule 3 if that matters for your flow (branch pushes and MRs will then both run).
 - **Fork MRs**: `pipeline-scan` requires `$CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_MERGE_REQUEST_PROJECT_ID`. Fork MR pipelines run in the fork without your variables.
 - **Merge request approvals**: to block merges on a failed gate, enable **Settings > Merge requests > Pipelines must succeed**.
 
@@ -116,7 +127,7 @@ The job ends when the upload is accepted. Results appear in the Veracode Platfor
 
 **Change the MR gate policy**: edit `PR_GATE_POLICY` under `variables:`. For custom policies, download with `--request_policy` and pass `--policy_file` ([parameters](https://docs.veracode.com/r/r_pipeline_scan_commands)).
 
-**Relax the feature gate**: add `--fail_on_severity "Very High, High"` to the `else` branch scanner call.
+**Relax the branch gate**: add `--fail_on_severity "Very High, High"` to the `else` branch scanner call.
 
 **GitLab Security Dashboard**: add `--gl_vulnerability_generation true` to the scanner call and publish `veracode_gitlab_vulnerabilities.json` under `artifacts:reports:sast` ([Veracode example](https://docs.veracode.com/r/Pipeline_Scan_Example_for_Using_GitLab_and_Gradle_with_Automatic_Vulnerability_Generation_Using_a_Built_in_Policy)). Rename the file per artifact inside the loop.
 
@@ -130,7 +141,7 @@ The job ends when the upload is accepted. Results appear in the Veracode Platfor
 
 | Symptom | Check |
 |---------|-------|
-| Credentials empty on feature/MR pipelines | Variables marked Protected. Unprotect them. |
+| Credentials empty on branch/MR pipelines | Variables marked Protected. Unprotect them. |
 | No pipeline on push | Branch does not match `workflow:rules`, or an MR is open (the MR pipeline runs instead). |
 | Duplicate branch and MR pipelines | Known GitLab issue ([#555601](https://gitlab.com/gitlab-org/gitlab/-/issues/555601)): `$CI_OPEN_MERGE_REQUESTS` is only evaluated in `workflow:rules` when a job references it. Keep the `echo` line in `package`. |
 | `No packaged artifacts found` | Run `veracode package --source . --output verascan --trust` locally. Add a build step if needed. |

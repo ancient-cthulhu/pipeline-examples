@@ -11,13 +11,13 @@
 #   VERACODE_APP_NAME   Application profile name (default: {workspace}/{repo})
 #
 # Scan selection (native start conditions, "triggers:" at the bottom):
-#   push to default branch       -> veracode-policy   (Policy Scan)
-#   push to feature/**           -> veracode-feature  (Pipeline Scan, fails on any flaw)
+#   push to default branch       -> branches: main   (Policy Scan)
+#   push to any other branch     -> default           (Pipeline Scan, fails on any flaw)
 #   PR targeting default branch  -> veracode-pr       (Pipeline Scan, policy gate)
-#   all of the above             -> Agent-based SCA (non-blocking)
+#   all of the above             -> IaC scan + Agent-based SCA (non-blocking)
 #
 # Bitbucket does not expose the default branch as a variable. If yours is not
-# "main", update the two conditions in "triggers:".
+# "main", update the "main:" selector and the condition in "triggers:".
 # =============================================================================
 
 image: maven:3.9-eclipse-temurin-17
@@ -33,6 +33,11 @@ definitions:
           - apt-get update -qq && apt-get install -y -qq unzip >/dev/null
           - curl -fsS https://tools.veracode.com/veracode-cli/install | sh
           - ./veracode version
+          # Static scan of the checked-out files: IaC misconfigurations and secrets
+          - |
+            export VERACODE_API_KEY_ID="$VERACODE_API_ID"
+            export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
+            ./veracode scan --source . --type directory --format table || echo "IaC scan completed"
           - mkdir -p verascan
           - ./veracode package --source . --output verascan --trust
           - ls -lhR verascan
@@ -57,13 +62,14 @@ definitions:
           - curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
 
     # -------------------------------------------------------------------------
-    # PIPELINE SCAN (feature): no fail criteria, every flaw counts
+    # PIPELINE SCAN (branch): no fail criteria, every flaw counts
     # -------------------------------------------------------------------------
-    - step: &pipeline-scan-feature
-        name: Pipeline Scan (feature)
+    - step: &pipeline-scan-branch
+        name: Pipeline Scan (branch)
         script:
-          - GATE_POLICY=""
-          - echo "Gate - fail on any flaw"
+          - |
+            GATE_POLICY=""
+            echo "Gate: fail on any flaw"
           - &pipeline_scan_loop |
             apt-get update -qq && apt-get install -y -qq unzip >/dev/null
             curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
@@ -119,8 +125,9 @@ definitions:
     - step: &pipeline-scan-pr
         name: Pipeline Scan (PR gate)
         script:
-          - GATE_POLICY="Veracode Recommended Very High"
-          - echo "Gate - policy $GATE_POLICY"
+          - |
+            GATE_POLICY="Veracode Recommended Very High"
+            echo "Gate: policy '$GATE_POLICY'"
           - *pipeline_scan_loop
         artifacts:
           - scan_results/**
@@ -150,8 +157,9 @@ definitions:
               exit 1
             fi
             cp "$JAR" VeracodeJavaAPI.jar
-          - APP_NAME="${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}"
-          - echo "Veracode Application Profile - $APP_NAME"
+          - |
+            APP_NAME="${VERACODE_APP_NAME:-$BITBUCKET_REPO_FULL_NAME}"
+            echo "Veracode Application Profile: $APP_NAME"
           - |
             java -jar VeracodeJavaAPI.jar \
               -vid "$VERACODE_API_ID" \
@@ -164,24 +172,28 @@ definitions:
               -version "${BITBUCKET_BRANCH}-${BITBUCKET_BUILD_NUMBER}-$(date +%Y%m%d%H%M%S)"
 
 # =============================================================================
-# PIPELINES (custom, started by the triggers below)
+# PIPELINES (start conditions)
 # =============================================================================
 pipelines:
-  custom:
-    veracode-policy:
+  # Default branch push -> Policy Scan
+  branches:
+    main:
       - step: *package
       - parallel:
           steps:
             - step: *sca
             - step: *policy-scan
 
-    veracode-feature:
-      - step: *package
-      - parallel:
-          steps:
-            - step: *sca
-            - step: *pipeline-scan-feature
+  # Every other branch push -> Pipeline Scan. "default" excludes tag pushes.
+  default:
+    - step: *package
+    - parallel:
+        steps:
+          - step: *sca
+          - step: *pipeline-scan-branch
 
+  # Started by the pullrequest-push trigger below
+  custom:
     veracode-pr:
       - step: *package
       - parallel:
@@ -190,16 +202,9 @@ pipelines:
             - step: *pipeline-scan-pr
 
 # =============================================================================
-# TRIGGERS (start conditions)
+# TRIGGERS (pull requests, filtered by destination branch)
 # =============================================================================
 triggers:
-  repository-push:
-    - condition: BITBUCKET_BRANCH == "main"
-      pipelines:
-        - veracode-policy
-    - condition: glob(BITBUCKET_BRANCH, "feature/**")
-      pipelines:
-        - veracode-feature
   pullrequest-push:
     - condition: BITBUCKET_PR_DESTINATION_BRANCH == "main"
       pipelines:

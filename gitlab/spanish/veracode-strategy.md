@@ -10,9 +10,10 @@ Archivo de pipeline: [`.gitlab-ci.yml`](./.gitlab-ci.yml). Copialo a la raiz de 
 
 | Disparador | Producto Veracode | Gate | Proposito |
 |------------|-------------------|------|-----------|
-| Push a `feature/**` | Pipeline Scan | Falla con cualquier hallazgo | Feedback al desarrollador en cada push |
+| Push a cualquier rama que no es la por defecto | Pipeline Scan | Falla con cualquier hallazgo | Feedback al desarrollador en cada push |
 | Merge request a la rama por defecto | Pipeline Scan | Politica `Veracode Recommended Very High` | Demostrar que el MR es seguro para merge |
 | Push a la rama por defecto | Policy Scan | Politica de la plataforma | Registro de cumplimiento del perfil de aplicacion |
+| Todos los anteriores | Escaneo IaC (Veracode CLI) | No bloqueante | Errores de configuracion y secretos en los archivos del repo |
 | Todos los anteriores | SCA basado en agente | No bloqueante (`allow_failure: true`) | Analisis de dependencias de terceros |
 
 Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` sin hallazgos, `1-200` cantidad de hallazgos que cumplen el criterio, `253-255` timeout o error. Cualquier codigo distinto de cero falla el job.
@@ -22,12 +23,12 @@ Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_
 ## Estructura del Pipeline
 
 ```text
-workflow:rules  (MR a rama por defecto | push rama por defecto | push feature/**)
+workflow:rules  (MR a rama por defecto | push rama por defecto | push a otra rama)
                     |
    stage: package   +-- package (CLI autopackager, APP_NAME via dotenv)
                     +-- sca     (needs: [], allow_failure)
                     |
-   stage: scan      +-- pipeline-scan  push feature/**: cualquier hallazgo falla
+   stage: scan      +-- pipeline-scan  push a otra rama: cualquier hallazgo falla
                     |                  MR: gate de politica
                     +-- policy-scan    push rama por defecto: UploadAndScan
 ```
@@ -44,8 +45,8 @@ workflow:rules  (MR a rama por defecto | push rama por defecto | push feature/**
 1. Pipeline de MR cuyo destino es `$CI_DEFAULT_BRANCH`: se ejecuta.
 2. Cualquier otro pipeline de MR: nunca.
 3. Push a `$CI_DEFAULT_BRANCH`: se ejecuta. Se evalua antes de la regla 4 para que el policy scan corra aunque la rama por defecto sea origen de un MR abierto.
-4. Push a una rama con MR abierto (`$CI_OPEN_MERGE_REQUESTS`): nunca, el pipeline del MR lo cubre. Nota: tambien aplica si el MR abierto apunta a una rama que no es la por defecto, en ese caso la rama feature no tiene pipeline.
-5. Push a `feature/*` (regex `^feature\/`, incluye nombres anidados): se ejecuta.
+4. Push a una rama con MR abierto (`$CI_OPEN_MERGE_REQUESTS`): nunca, el pipeline del MR lo cubre. Nota: tambien aplica si el MR abierto apunta a una rama que no es la por defecto, en ese caso esa rama no tiene pipeline.
+5. Push a cualquier otra rama (`$CI_COMMIT_BRANCH` definida): se ejecuta. Los pipelines de tag dejan `$CI_COMMIT_BRANCH` vacia, asi que los tags nunca coinciden.
 
 ---
 
@@ -60,7 +61,7 @@ workflow:rules  (MR a rama por defecto | push rama por defecto | push feature/**
 | `SRCCLR_API_TOKEN` | Para SCA | Masked | Token de SCA basado en agente. SCA se omite si no esta definido |
 | `VERACODE_APP_NAME` | No | | Nombre del perfil de aplicacion. Por defecto `$CI_PROJECT_PATH` |
 
-**No marques estas variables como Protected** salvo que `feature/*` sea un patron de rama protegida. Las variables Protected solo se exponen a pipelines en ramas y tags protegidos, asi que los pipelines de feature y MR correrian con credenciales vacias.
+**No marques estas variables como Protected** salvo que todas las ramas que escaneas esten protegidas. Las variables Protected solo se exponen a pipelines en ramas y tags protegidos, asi que los pipelines de rama y MR correrian con credenciales vacias.
 
 Credenciales de API: [Generar credenciales de API](https://docs.veracode.com/r/t_create_api_creds). Token de SCA: [Crear un agente SCA](https://docs.veracode.com/r/t_sc_cli_agent).
 
@@ -70,7 +71,17 @@ Credenciales de API: [Generar credenciales de API](https://docs.veracode.com/r/t
 
 ### package
 
-Imagen `ubuntu:22.04`. Instala Veracode CLI, ejecuta `veracode package --source . --output verascan --trust`, escribe cada `.war`, `.jar`, `.zip` en `artifact_list.txt` y falla si no hay ninguno. Exporta `APP_NAME` mediante un reporte `dotenv` para los jobs siguientes.
+Imagen `ubuntu:22.04`. Instala Veracode CLI, ejecuta el escaneo IaC (abajo) y luego `veracode package --source . --output verascan --trust`, escribe cada `.war`, `.jar`, `.zip` en `artifact_list.txt` y falla si no hay ninguno. Exporta `APP_NAME` mediante un reporte `dotenv` para los jobs siguientes.
+
+### Escaneo IaC
+
+Corre dentro de `package`, justo despues de instalar el CLI, asi escanea los archivos del repositorio y no una salida de build:
+
+```bash
+./veracode scan --source . --type directory --format table
+```
+
+Es el [escaneo de contenedores, IaC y secretos](https://docs.veracode.com/r/veracode_scan) del Veracode CLI apuntando al directorio de trabajo. Se autentica con `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET`, derivadas de las credenciales existentes. Los errores se ignoran con `|| echo`, asi nunca bloquea el build.
 
 ### sca
 
@@ -82,7 +93,7 @@ Escanea cada artefacto por separado, continua despues de un fallo y al final fal
 
 | Origen del pipeline | Argumentos agregados | Resultado |
 |---------------------|----------------------|-----------|
-| `push` a `feature/**` | ninguno | Cada hallazgo cuenta, cualquier hallazgo falla el job |
+| `push` a una rama que no es la por defecto | ninguno | Cada hallazgo cuenta, cualquier hallazgo falla el job |
 | `merge_request_event` | `--policy_name "$PR_GATE_POLICY"` | Solo los hallazgos que violan la politica fallan el job |
 
 Los resultados se guardan como artefactos del job (`scan_results/<artefacto>_results.json`, `when: always`, 1 mes).
@@ -106,7 +117,7 @@ El job termina cuando la carga es aceptada. Los resultados aparecen en la Plataf
 ## Notas de Comportamiento
 
 - **Rama por defecto**: todas las reglas usan `$CI_DEFAULT_BRANCH`. No requiere cambios si tu rama por defecto es `master` o `develop`.
-- **MRs a otras ramas**: la regla 2 los bloquea. Si una rama feature tiene un MR abierto hacia otra rama, la regla 3 tambien bloquea sus pipelines de push y esa rama no se escanea. Quita la regla 3 si eso afecta tu flujo (push y MR correran ambos).
+- **MRs a otras ramas**: la regla 2 los bloquea. Si una rama tiene un MR abierto hacia otra rama, la regla 3 tambien bloquea sus pipelines de push y esa rama no se escanea. Quita la regla 3 si eso afecta tu flujo (push y MR correran ambos).
 - **MRs desde forks**: `pipeline-scan` requiere `$CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_MERGE_REQUEST_PROJECT_ID`. Los pipelines de MR desde forks corren en el fork sin tus variables.
 - **Aprobacion de MRs**: para bloquear merges con gate fallido, habilita **Settings > Merge requests > Pipelines must succeed**.
 
@@ -116,7 +127,7 @@ El job termina cuando la carga es aceptada. Los resultados aparecen en la Plataf
 
 **Cambiar la politica del gate de MR**: edita `PR_GATE_POLICY` en `variables:`. Para politicas personalizadas, descargala con `--request_policy` y usa `--policy_file` ([parametros](https://docs.veracode.com/r/r_pipeline_scan_commands)).
 
-**Relajar el gate de feature**: agrega `--fail_on_severity "Very High, High"` a la llamada del scanner en la rama `else`.
+**Relajar el gate de rama**: agrega `--fail_on_severity "Very High, High"` a la llamada del scanner en la rama `else`.
 
 **Security Dashboard de GitLab**: agrega `--gl_vulnerability_generation true` a la llamada del scanner y publica `veracode_gitlab_vulnerabilities.json` en `artifacts:reports:sast` ([ejemplo de Veracode](https://docs.veracode.com/r/Pipeline_Scan_Example_for_Using_GitLab_and_Gradle_with_Automatic_Vulnerability_Generation_Using_a_Built_in_Policy)). Renombra el archivo por artefacto dentro del loop.
 
@@ -130,7 +141,7 @@ El job termina cuando la carga es aceptada. Los resultados aparecen en la Plataf
 
 | Sintoma | Revisar |
 |---------|---------|
-| Credenciales vacias en pipelines de feature/MR | Variables marcadas como Protected. Desprotegelas. |
+| Credenciales vacias en pipelines de rama/MR | Variables marcadas como Protected. Desprotegelas. |
 | No hay pipeline en el push | La rama no coincide con `workflow:rules`, o hay un MR abierto (corre el pipeline del MR). |
 | Pipelines duplicados de rama y MR | Bug conocido de GitLab ([#555601](https://gitlab.com/gitlab-org/gitlab/-/issues/555601)): `$CI_OPEN_MERGE_REQUESTS` solo se evalua en `workflow:rules` si un job lo referencia. Manten la linea `echo` en `package`. |
 | `No se encontraron artefactos empaquetados` | Ejecuta `veracode package --source . --output verascan --trust` localmente. Agrega un paso de build si hace falta. |

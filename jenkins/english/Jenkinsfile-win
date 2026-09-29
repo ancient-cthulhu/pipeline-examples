@@ -16,9 +16,9 @@
 //
 // Scan selection:
 //   push to default branch          -> Policy Scan (all artifacts, one upload)
-//   push to feature/*               -> Pipeline Scan (fails on any flaw)
+//   push to any other branch        -> Pipeline Scan (fails on any flaw)
 //   change request to default branch -> Pipeline Scan (policy gate)
-//   all of the above                -> Agent-based SCA (non-blocking)
+//   all of the above                -> IaC scan + Agent-based SCA (non-blocking)
 //
 // Agent requirements: Windows PowerShell 5.1+, Java 8+, Maven on PATH.
 // If your default branch is not "main", change DEFAULT_BRANCH below.
@@ -83,6 +83,12 @@ pipeline {
                     if (-not (Test-Path $veracode)) { $veracode = "veracode" }
                     & $veracode version
 
+                    # Static scan of the checked-out files: IaC misconfigurations and secrets
+                    $env:VERACODE_API_KEY_ID = $env:VERACODE_API_ID
+                    $env:VERACODE_API_KEY_SECRET = $env:VERACODE_API_KEY
+                    & $veracode scan --source . --type directory --format table
+                    Write-Host "IaC scan completed (exit $LASTEXITCODE)"
+
                     $sourceDir = if ($env:VERACODE_SOURCE_DIR) { $env:VERACODE_SOURCE_DIR } else { "app" }
                     New-Item -ItemType Directory -Force -Path verascan | Out-Null
                     & $veracode package --source "$sourceDir" --output verascan --trust
@@ -136,13 +142,13 @@ pipeline {
                 }
 
                 // -------------------------------------------------------------
-                // PIPELINE SCAN: feature/* push (any flaw fails) and
+                // PIPELINE SCAN: non-default branch push (any flaw fails) and
                 // change request to default branch (policy gate)
                 // -------------------------------------------------------------
                 stage('Pipeline Scan') {
                     when {
                         anyOf {
-                            expression { !env.CHANGE_ID && env.BRANCH_NAME?.startsWith('feature/') }
+                            expression { !env.CHANGE_ID && !env.TAG_NAME && env.BRANCH_NAME && env.BRANCH_NAME != env.DEFAULT_BRANCH }
                             expression { env.CHANGE_ID && env.CHANGE_TARGET == env.DEFAULT_BRANCH }
                         }
                     }
@@ -159,7 +165,7 @@ pipeline {
                                 if (-not $jar) { Write-Host "ERROR: pipeline-scan.jar not found"; exit 1 }
 
                                 # Change request: evaluate findings against a Veracode policy
-                                # feature:        no fail criteria, every flaw counts
+                                # branch:         no fail criteria, every flaw counts
                                 $gateArgs = @()
                                 if ($env:CHANGE_ID) {
                                     $gateArgs = @("--policy_name", $env:PR_GATE_POLICY)

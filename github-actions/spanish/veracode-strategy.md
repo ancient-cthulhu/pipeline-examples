@@ -10,9 +10,10 @@ Archivo de workflow: [`veracode-scans.yml`](./veracode-scans.yml). Copialo a `.g
 
 | Disparador | Producto Veracode | Gate | Proposito |
 |------------|-------------------|------|-----------|
-| Push a `feature/**` | Pipeline Scan | Falla con cualquier hallazgo | Feedback al desarrollador en cada push |
+| Push a cualquier rama que no es la por defecto | Pipeline Scan | Falla con cualquier hallazgo | Feedback al desarrollador en cada push |
 | Pull request a la rama por defecto | Pipeline Scan | Politica `Veracode Recommended Very High` | Demostrar que el PR es seguro para merge |
 | Push a la rama por defecto | Policy Scan | Politica de la plataforma | Registro de cumplimiento del perfil de aplicacion |
+| Todos los anteriores | Escaneo IaC (Veracode CLI) | No bloqueante | Errores de configuracion y secretos en los archivos del repo |
 | Todos los anteriores | SCA basado en agente | No bloqueante | Analisis de dependencias de terceros |
 
 Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` sin hallazgos, `1-200` cantidad de hallazgos que cumplen el criterio, `253-255` timeout o error. El workflow trata cualquier codigo distinto de cero como fallo.
@@ -22,17 +23,18 @@ Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_
 ## Estructura del Workflow
 
 ```text
-on: push (main, feature/**) | pull_request (a main)
+on: push (todas las ramas) | pull_request (a main)
                     |
         +-----------+-----------+
         |                       |
      package                   sca
-  (CLI autopackager)      (no bloqueante)
+  (CLI autopackager     (no bloqueante)
+   + escaneo IaC)
         |
         +---------------------------+
         |                           |
   pipeline-scan                policy-scan
-  push feature/**: cualquier   push rama por defecto:
+  push a otra rama: cualquier  push rama por defecto:
   hallazgo falla               UploadAndScan
   PR: gate de politica
 ```
@@ -68,8 +70,19 @@ Credenciales de API: [Generar credenciales de API](https://docs.veracode.com/r/t
 1. Hace checkout del codigo.
 2. Instala Veracode CLI (`curl -fsS https://tools.veracode.com/veracode-cli/install | sh`).
 3. Ejecuta `veracode package --source . --output verascan --trust`.
-4. Escribe cada `.war`, `.jar`, `.zip` encontrado en `artifact_list.txt` y falla si no hay ninguno.
-5. Sube `verascan/` y `artifact_list.txt` como el artefacto de workflow `verascan`.
+4. Ejecuta el escaneo IaC (abajo).
+5. Escribe cada `.war`, `.jar`, `.zip` encontrado en `artifact_list.txt` y falla si no hay ninguno.
+6. Sube `verascan/` y `artifact_list.txt` como el artefacto de workflow `verascan`.
+
+### Escaneo IaC
+
+Corre dentro del job `package`, justo despues de instalar el CLI, asi escanea los archivos del repositorio y no una salida de build:
+
+```bash
+./veracode scan --source . --type directory --format table
+```
+
+Es el [escaneo de contenedores, IaC y secretos](https://docs.veracode.com/r/veracode_scan) del Veracode CLI apuntando al directorio de trabajo. Lee los archivos de forma estatica y reporta errores de configuracion y secretos en el codigo. El CLI se autentica con `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET`, que el step deriva de los secretos existentes. Los errores se ignoran con `|| echo`, asi nunca bloquea el build.
 
 ### sca
 
@@ -81,7 +94,7 @@ Escanea cada artefacto de `artifact_list.txt` por separado, continua despues de 
 
 | Evento | Argumentos agregados | Resultado |
 |--------|----------------------|-----------|
-| `push` a `feature/**` | ninguno | Cada hallazgo cuenta, cualquier hallazgo falla el job |
+| `push` a una rama que no es la por defecto | ninguno | Cada hallazgo cuenta, cualquier hallazgo falla el job |
 | `pull_request` | `--policy_name "Veracode Recommended Very High"` | Solo los hallazgos que violan la politica fallan el job |
 
 Los resultados se suben como `pipeline-scan-results` (`<artefacto>_results.json`), incluso si falla.
@@ -104,8 +117,8 @@ El job termina cuando la carga es aceptada. Los resultados aparecen en la Plataf
 
 ## Notas de Comportamiento
 
-- **Rama por defecto**: los disparadores en `on:` no aceptan expresiones, por eso `main` esta fijo ahi. Las condiciones de los jobs usan `github.event.repository.default_branch`. Si tu rama por defecto es `master` o `develop`, cambia ambas listas `branches:`.
-- **Ejecuciones duplicadas**: un push a `feature/x` con un PR abierto dispara `push` y `pull_request`. Es esperado: la ejecucion de push da feedback completo, la del PR es el gate de merge. Marca solo el check del PR como requerido en la proteccion de ramas.
+- **Rama por defecto**: `on.push.branches` es `'**'`, asi que corre en todas las ramas. Las condiciones de los jobs comparan contra `github.event.repository.default_branch`, asi que la division entre escaneo de rama y policy scan no necesita cambios. Solo el filtro de `pull_request` fija `main`, porque los filtros de disparadores no aceptan expresiones.
+- **Ejecuciones duplicadas**: un push a una rama con un PR abierto dispara `push` y `pull_request`. Es esperado: la ejecucion de push da feedback completo, la del PR es el gate de merge. Marca solo el check del PR como requerido en la proteccion de ramas.
 - **Concurrencia**: las ejecuciones nuevas cancelan las anteriores en la misma ref, excepto en la rama por defecto, donde las cargas de politica nunca se cancelan.
 - **PRs desde forks**: se omiten, porque GitHub no expone secretos a esos PRs.
 - **Runners self-hosted**: `actions/checkout@v6`, `upload-artifact@v7` y `download-artifact@v8` usan Node.js 24 y requieren Actions Runner 2.327.1 o superior. Se requiere Java para el scanner y el API wrapper (preinstalado en `ubuntu-latest`).
@@ -116,13 +129,13 @@ El job termina cuando la carga es aceptada. Los resultados aparecen en la Plataf
 
 **Cambiar la politica del gate de PR**: edita `PR_GATE_POLICY` en el `env:` global. Las politicas integradas se soportan por nombre. Para una politica personalizada, descargala con `--request_policy` y usa `--policy_file` ([parametros](https://docs.veracode.com/r/r_pipeline_scan_commands)).
 
-**Relajar el gate de feature**: agrega argumentos en la rama `else` del bloque del gate, por ejemplo:
+**Relajar el gate de rama**: agrega argumentos en la rama `else` del bloque del gate, por ejemplo:
 
 ```bash
 GATE_ARGS=(--fail_on_severity "Very High, High")
 ```
 
-**Escanear todas las ramas que no son la por defecto**: reemplaza `'feature/**'` en `on.push.branches` por `'**'`. Las condiciones de los jobs ya lo contemplan.
+**Limitar que ramas se escanean**: reemplaza `'**'` en `on.push.branches` por una lista explicita, por ejemplo `main` y `'feature/**'`. Los push de tags nunca disparan este workflow, porque los filtros `branches` no coinciden con tags.
 
 **Agregar un paso de build**: si el autopackaging no cubre tu proyecto, compila antes del autopackager o reemplazalo y escribe las rutas de tus artefactos en `artifact_list.txt`:
 

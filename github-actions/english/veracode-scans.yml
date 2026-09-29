@@ -11,18 +11,18 @@ name: CI - Veracode
 #
 # Scan selection:
 #   push to default branch          -> Policy Scan (all artifacts, one upload)
-#   push to feature/**              -> Pipeline Scan (fails on any flaw)
+#   push to any other branch        -> Pipeline Scan (fails on any flaw)
 #   pull_request to default branch  -> Pipeline Scan (policy gate)
-#   all of the above                -> Agent-based SCA (non-blocking)
+#   all of the above                -> IaC scan + Agent-based SCA (non-blocking)
 #
-# If your default branch is not "main", update the branch filters under "on:".
-# Job conditions resolve the default branch dynamically.
+# Push runs on every branch. Job conditions resolve the default branch
+# dynamically. The pull_request filter cannot use an expression, so if your
+# default branch is not "main", update it under "on:".
 
 on:
   push:
     branches:
-      - main
-      - 'feature/**'
+      - '**'
   pull_request:
     branches:
       - main
@@ -70,6 +70,13 @@ jobs:
           curl -fsS https://tools.veracode.com/veracode-cli/install | sh
           ./veracode version
 
+      - name: Run Veracode IaC Scan
+        run: |
+          # Static scan of the checked-out files: IaC misconfigurations and secrets
+          export VERACODE_API_KEY_ID="$VERACODE_API_ID"
+          export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
+          ./veracode scan --source . --type directory --format table || echo "IaC scan completed"
+
       - name: Run Veracode Autopackager
         run: |
           mkdir -p verascan
@@ -112,7 +119,7 @@ jobs:
           curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
 
   # ===========================================================================
-  # PIPELINE SCAN: feature/** push (any flaw fails) and PR (policy gate)
+  # PIPELINE SCAN: non-default branch push (any flaw fails) and PR (policy gate)
   # ===========================================================================
   pipeline-scan:
     name: Pipeline Scan
@@ -132,12 +139,12 @@ jobs:
           curl -fsSO https://downloads.veracode.com/securityscan/pipeline-scan-LATEST.zip
           unzip -o pipeline-scan-LATEST.zip pipeline-scan.jar
 
-      - name: Run Pipeline Scan (all artifacts)
+      - name: Run Pipeline Scan
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           # PR:      evaluate findings against a Veracode policy
-          # feature: no fail criteria, every flaw counts toward the exit code
+          # branch: no fail criteria, every flaw counts toward the exit code
           GATE_ARGS=()
           if [ "$EVENT_NAME" = "pull_request" ]; then
             GATE_ARGS=(--policy_name "$PR_GATE_POLICY")
@@ -197,7 +204,7 @@ jobs:
   # POLICY SCAN: push to default branch
   # ===========================================================================
   policy-scan:
-    name: Policy Scan (default branch)
+    name: Policy Scan
     needs: package
     if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
@@ -226,7 +233,7 @@ jobs:
           fi
           cp "$JAR" VeracodeJavaAPI.jar
 
-      - name: Upload and Scan (Policy)
+      - name: Upload and Scan
         env:
           APP_NAME: ${{ needs.package.outputs.app_name }}
           SCAN_VERSION: ${{ github.ref_name }}-${{ github.run_number }}-${{ github.run_attempt }}

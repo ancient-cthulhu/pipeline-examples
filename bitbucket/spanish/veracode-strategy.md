@@ -10,9 +10,10 @@ Archivo del pipeline: [`veracode-scans.yml`](./veracode-scans.yml). Renombralo a
 
 | Disparador | Pipeline custom | Producto Veracode | Gate |
 |------------|-----------------|-------------------|------|
-| Push a `main` | `veracode-policy` | Policy Scan | Politica de la plataforma |
-| Push a `feature/**` | `veracode-feature` | Pipeline Scan | Falla con cualquier hallazgo |
+| Push a `main` | `branches: main` | Policy Scan | Politica de la plataforma |
+| Push a cualquier rama que no es la por defecto | `default` | Pipeline Scan | Falla con cualquier hallazgo |
 | PR con destino `main` | `veracode-pr` | Pipeline Scan | Politica `Veracode Recommended Very High` |
+| Todos los anteriores | (mismo pipeline) | Escaneo IaC (Veracode CLI) | No bloqueante |
 | Todos los anteriores | (mismo pipeline) | SCA basado en agente | No bloqueante |
 
 Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` sin hallazgos, `1-200` cantidad de hallazgos que cumplen el criterio, `253-255` timeout o error. Cualquier codigo distinto de cero falla el step.
@@ -21,18 +22,19 @@ Codigos de salida de Pipeline Scan ([docs](https://docs.veracode.com/r/Pipeline_
 
 ## Estructura del Pipeline
 
-El archivo usa las [condiciones de inicio](https://support.atlassian.com/bitbucket-cloud/docs/pipeline-start-conditions/) de Bitbucket (`triggers:`). Los selectores clasicos `pull-requests:` solo coinciden con la rama **origen** del PR; `pullrequest-push` con `BITBUCKET_PR_DESTINATION_BRANCH` filtra por destino de forma nativa, asi los PRs a otras ramas no inician nada.
+Los push usan los selectores clasicos, que Bitbucket resuelve de lo mas especifico a lo mas general y que nunca coinciden con push de tags. Los pull requests usan una [condicion de inicio](https://support.atlassian.com/bitbucket-cloud/docs/pipeline-start-conditions/) (`triggers:`), porque los selectores clasicos `pull-requests:` solo coinciden con la rama **origen** del PR, mientras que `pullrequest-push` con `BITBUCKET_PR_DESTINATION_BRANCH` filtra por destino.
 
 ```text
-triggers:
-  repository-push   BITBUCKET_BRANCH == "main"               -> veracode-policy
-  repository-push   glob(BITBUCKET_BRANCH, "feature/**")     -> veracode-feature
-  pullrequest-push  BITBUCKET_PR_DESTINATION_BRANCH == "main" -> veracode-pr
+pipelines:
+  branches: main   -> package -> parallel( sca, Policy Scan )
+  default          -> package -> parallel( sca, Pipeline Scan )   toda otra rama, sin tags
+  custom:  veracode-pr -> package -> parallel( sca, Pipeline Scan, gate de politica )
 
-cada pipeline:  package  ->  parallel( sca, <step de escaneo> )
+triggers:
+  pullrequest-push  BITBUCKET_PR_DESTINATION_BRANCH == "main" -> veracode-pr
 ```
 
-Los triggers solo pueden iniciar pipelines definidos en `pipelines.custom`. Esos pipelines tambien aparecen en **Run pipeline** para ejecuciones manuales.
+Un nombre exacto de rama gana sobre `default`, asi `main` recibe el policy scan y toda otra rama el pipeline scan. `default` [excluye los push de tags](https://support.atlassian.com/bitbucket-cloud/docs/pipeline-start-conditions/). Los triggers solo pueden iniciar pipelines definidos en `pipelines.custom`, por eso el pipeline de PR vive ahi; tambien aparece en **Run pipeline** para ejecuciones manuales.
 
 ---
 
@@ -61,13 +63,23 @@ Instala Veracode CLI, ejecuta `veracode package --source . --output verascan --t
 
 Ejecuta `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor`. Los errores se ignoran con `|| echo` para que SCA nunca bloquee. Quita ese sufijo para aplicar la politica de SCA.
 
-### Pipeline Scan (feature / gate PR)
+### Escaneo IaC
+
+Corre dentro del step `Empaquetar Artefactos`, justo despues de instalar el CLI, asi escanea los archivos del repositorio y no una salida de build:
+
+```bash
+./veracode scan --source . --type directory --format table
+```
+
+Es el [escaneo de contenedores, IaC y secretos](https://docs.veracode.com/r/veracode_scan) del Veracode CLI apuntando al directorio de trabajo. Se autentica con `VERACODE_API_KEY_ID` y `VERACODE_API_KEY_SECRET`, derivadas de las variables del repositorio existentes. Los errores se ignoran con `|| echo`, asi nunca bloquea.
+
+### Pipeline Scan (rama / gate PR)
 
 Ambos steps comparten un script mediante un anchor YAML (`&pipeline_scan_loop`). Cada step define `GATE_POLICY` primero:
 
 | Step | `GATE_POLICY` | Resultado |
 |------|---------------|-----------|
-| `Pipeline Scan (feature)` | vacio | Sin criterio de fallo, cualquier hallazgo falla el step |
+| `Pipeline Scan (rama)` | vacio | Sin criterio de fallo, cualquier hallazgo falla el step |
 | `Pipeline Scan (gate PR)` | `Veracode Recommended Very High` | Agrega `--policy_name`, solo fallan los hallazgos que violan la politica |
 
 Cada artefacto se escanea por separado, el ciclo continua despues de un fallo y el step falla al final si algun artefacto fallo. Los resultados se guardan en `scan_results/<artefacto>_results.json`.
@@ -87,8 +99,8 @@ Descarga el ultimo [Veracode Java API Wrapper](https://docs.veracode.com/r/c_abo
 
 ## Notas de Comportamiento
 
-- **Rama por defecto**: Bitbucket no tiene una variable predefinida para la rama por defecto. Si la tuya no es `main`, cambia ambas condiciones `main` en `triggers:`.
-- **Ejecuciones duplicadas**: un push a `feature/x` con un PR abierto a `main` inicia `veracode-feature` y `veracode-pr`. Es esperado. Usa el resultado de `veracode-pr` como check de merge.
+- **Rama por defecto**: Bitbucket no tiene una variable predefinida para la rama por defecto. Si la tuya no es `main`, renombra el selector `main:` en `branches:` y actualiza la condicion en `triggers:`.
+- **Ejecuciones duplicadas**: un push a una rama con un PR abierto a `main` inicia el pipeline `default` y `veracode-pr`, porque los triggers son acumulativos con los selectores clasicos. Es esperado. Usa el resultado de `veracode-pr` como check de merge.
 - **PRs desde forks**: las variables secured no estan disponibles para forks, asi que la autenticacion de los escaneos fallara ahi.
 - **Las lineas del script comparten shell**: las variables definidas en un item de `script:` (por ejemplo `GATE_POLICY`) estan disponibles en los items siguientes del mismo step.
 
@@ -98,15 +110,13 @@ Descarga el ultimo [Veracode Java API Wrapper](https://docs.veracode.com/r/c_abo
 
 **Cambiar la politica del gate de PR**: edita `GATE_POLICY` en el step `Pipeline Scan (gate PR)`. Para una politica personalizada, descargala con `--request_policy` y usa `--policy_file` ([parametros](https://docs.veracode.com/r/r_pipeline_scan_commands)).
 
-**Relajar el gate de feature**: agrega `--fail_on_severity "Very High, High"` en la rama `else` del ciclo de escaneo.
+**Relajar el gate de rama**: agrega `--fail_on_severity "Very High, High"` en la rama `else` del ciclo de escaneo.
 
-**Escanear todas las ramas que no son la por defecto**: cambia la condicion de feature a:
+**Limitar que ramas se escanean**: reemplaza `default:` por selectores explicitos en `branches:`, por ejemplo `'feature/**'`. Las ramas que no coincidan con nada no ejecutan pipeline.
 
-```yaml
-- condition: glob(BITBUCKET_BRANCH, "**") && BITBUCKET_BRANCH != "main"
-```
+**Escanear tambien los push de tags**: agrega un selector `tags:` con los steps que quieras. `default` nunca corre para tags.
 
-**Usar selectores clasicos**: mueve los tres pipelines custom a `branches:` / `pull-requests:` y elimina `triggers:`. En ese caso necesitas validar `BITBUCKET_PR_DESTINATION_BRANCH` dentro del script, como indica la [KB de Atlassian](https://support.atlassian.com/bitbucket-cloud/kb/trigger-pipelines-on-pull-request-to-destination-branch/).
+**Evitar el trigger**: mueve el pipeline de PR a `pull-requests:` y elimina `triggers:`. Ese selector solo coincide con la rama origen del PR, asi que necesitas validar `BITBUCKET_PR_DESTINATION_BRANCH` dentro del script, como indica la [KB de Atlassian](https://support.atlassian.com/bitbucket-cloud/kb/trigger-pipelines-on-pull-request-to-destination-branch/).
 
 ---
 
@@ -114,7 +124,7 @@ Descarga el ultimo [Veracode Java API Wrapper](https://docs.veracode.com/r/c_abo
 
 | Sintoma | Revisar |
 |---------|---------|
-| No inicia ningun pipeline | El nombre de la rama no coincide con una condicion, o las condiciones dicen `main` y tu rama por defecto es otra. |
+| No inicia ningun pipeline | Tu rama por defecto no es `main`, asi que el selector `main:` y la condicion del PR apuntan a la rama equivocada. |
 | `No se encontraron artefactos empaquetados` | La imagen no tiene tu toolchain de build. Cambia `image:` o agrega un paso de build antes del autopackager. |
 | Pipeline Scan sale con `255` | Credenciales invalidas, red bloqueada hacia `api.veracode.com`, o artefacto no soportado. |
 | Pipeline Scan sale con `253` o `254` | Timeout del escaneo. Agrega `--timeout <minutos>` (maximo 60). |

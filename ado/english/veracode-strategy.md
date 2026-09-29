@@ -10,9 +10,10 @@ Pipeline file: [`azure-pipelines.yml`](./azure-pipelines.yml). Place it in your 
 
 | Trigger | Stage | Veracode Product | Gate |
 |---------|-------|------------------|------|
-| Push to `feature/*` | `PipelineScan` | Pipeline Scan | Fails on any flaw |
+| Push to any non-default branch | `PipelineScan` | Pipeline Scan | Fails on any flaw |
 | Pull request to default branch | `PipelineScan` | Pipeline Scan | `Veracode Recommended Very High` policy |
 | Push to default branch | `PolicyScan` | Policy Scan | Platform policy |
+| All of the above | `Package` | IaC scan (Veracode CLI) | Non-blocking |
 | All of the above | `SCA` | Agent-Based SCA | Non-blocking |
 
 Pipeline Scan exit codes ([docs](https://docs.veracode.com/r/Pipeline_Scan_Status_Codes)): `0` no flaws, `1-200` number of flaws that matched the criteria, `253-255` timeout or error. Any non-zero code fails the stage.
@@ -22,7 +23,7 @@ Pipeline Scan exit codes ([docs](https://docs.veracode.com/r/Pipeline_Scan_Statu
 ## Pipeline Structure
 
 ```text
-trigger: main, feature/*        pr: main (GitHub/Bitbucket only)
+trigger: all branches           pr: main (GitHub/Bitbucket only)
                  |
      +-----------+------------+
      |                        |
@@ -31,14 +32,14 @@ trigger: main, feature/*        pr: main (GitHub/Bitbucket only)
      +-----------------------------+
      |                             |
   PipelineScan                 PolicyScan
-  feature/* push: any flaw     push to DEFAULT_BRANCH:
+  non-default push: any flaw   push to DEFAULT_BRANCH:
   PR to DEFAULT_BRANCH: policy UploadAndScan
 ```
 
 | Stage | Condition |
 |-------|-----------|
 | `Package`, `SCA` | Not a fork PR (`System.PullRequest.IsFork`) |
-| `PipelineScan` | Non-PR build on `refs/heads/feature/*`, or PR whose `System.PullRequest.TargetBranch` is `DEFAULT_BRANCH` |
+| `PipelineScan` | Non-PR build on any `refs/heads/*` other than `DEFAULT_BRANCH`, or PR whose `System.PullRequest.TargetBranch` is `DEFAULT_BRANCH` |
 | `PolicyScan` | Non-PR build on `refs/heads/<DEFAULT_BRANCH>` |
 
 The PR target check accepts both `main` and `refs/heads/main`, so it works regardless of the repository provider format.
@@ -92,11 +93,21 @@ Keeping `artifact_list.txt` outside `verascan/` prevents it from being uploaded 
 
 Runs `sca-downloads.veracode.com/ci.sh scan --recursive --update-advisor` in parallel with Package. Errors are swallowed with `|| echo`. Remove that suffix to enforce SCA policy.
 
+### IaC scan
+
+Runs in `Package`, right after the CLI is installed, so it scans the checked-out sources rather than a build output:
+
+```bash
+veracode scan --source "$(Build.SourcesDirectory)" --type directory --format table
+```
+
+This is the Veracode CLI [container, IaC, and secrets scan](https://docs.veracode.com/r/veracode_scan). The step maps the credentials to `VERACODE_API_KEY_ID` and `VERACODE_API_KEY_SECRET`, which is what the CLI reads. Errors are swallowed with `|| echo`, so it never blocks the build.
+
 ### PipelineScan
 
 - Validates that the credentials are real values, not unexpanded `$(VAR)` macros.
 - Scans each artifact separately, continues after a failure, and fails the stage at the end if any artifact failed.
-- `Build.Reason == PullRequest` adds `--policy_name "$(PR_GATE_POLICY)"`; feature pushes add no gate arguments.
+- `Build.Reason == PullRequest` adds `--policy_name "$(PR_GATE_POLICY)"`; branch pushes add no gate arguments.
 - Publishes `scan_results/` as `veracode-pipeline-scan-results-<attempt>` even on failure.
 
 ### PolicyScan
@@ -114,9 +125,10 @@ Downloads the latest [Veracode Java API Wrapper](https://docs.veracode.com/r/c_a
 
 ## Behavior Notes
 
-- **Duplicate runs (GitHub/Bitbucket repos)**: a push to `feature/x` with an open PR can start both a CI run and a PR run. Use the PR run as the required check.
+- **Duplicate runs (GitHub/Bitbucket repos)**: a push to a branch with an open PR can start both a CI run and a PR run. Use the PR run as the required check.
 - **Fork PRs**: skipped, because secrets are not exposed to fork builds by default.
-- **Manual runs**: a manual run on `feature/*` behaves like a push (Pipeline Scan, any flaw fails). On the default branch it runs the policy scan.
+- **Manual runs**: a manual run on any non-default branch behaves like a push (Pipeline Scan, any flaw fails). On the default branch it runs the policy scan.
+- **Tags**: the `PipelineScan` condition requires a `refs/heads/` ref, so a tag build never hits the branch gate.
 
 ---
 
@@ -124,13 +136,9 @@ Downloads the latest [Veracode Java API Wrapper](https://docs.veracode.com/r/c_a
 
 **Change the PR gate policy**: edit `PR_GATE_POLICY`. For a custom policy, download it with `--request_policy` and use `--policy_file` ([parameters](https://docs.veracode.com/r/r_pipeline_scan_commands)).
 
-**Relax the feature gate**: set `GATE_ARGS=(--fail_on_severity "Very High, High")` in the `else` branch.
+**Relax the branch gate**: set `GATE_ARGS=(--fail_on_severity "Very High, High")` in the `else` branch.
 
-**Scan every non-default branch**: set `trigger.branches.include` to `'*'` and change the feature condition to:
-
-```yaml
-ne(variables['Build.SourceBranch'], format('refs/heads/{0}', variables['DEFAULT_BRANCH']))
-```
+**Limit which branches are scanned**: replace `'*'` under `trigger.branches.include` with an explicit list, for example `main` and `feature/*`.
 
 ---
 
