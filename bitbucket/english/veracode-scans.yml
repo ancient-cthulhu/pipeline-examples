@@ -9,10 +9,11 @@
 # Optional:
 #   SRCCLR_API_TOKEN    Agent-based SCA token    (Secured)
 #   VERACODE_APP_NAME   Application profile name (default: {workspace}/{repo})
+#   VERACODE_BUSINESS_CRITICALITY  Used only when the profile is created (default: VeryHigh)
 #
 # Scan selection (native start conditions, "triggers:" at the bottom):
 #   push to default branch       -> branches: main   (Policy Scan)
-#   push to any other branch     -> default           (Pipeline Scan, fails on any flaw)
+#   push to any other branch     -> default           (Pipeline Scan, any flaw reported, non-blocking)
 #   PR targeting default branch  -> veracode-pr       (Pipeline Scan, policy gate)
 #   all of the above             -> IaC scan + Agent-based SCA (non-blocking)
 #
@@ -31,17 +32,19 @@ definitions:
         name: Package Artifacts
         script:
           - apt-get update -qq && apt-get install -y -qq unzip >/dev/null
-          - curl -fsS https://tools.veracode.com/veracode-cli/install | sh
-          - ./veracode version
+          - mkdir -p /opt/veracode-cli
+          - (cd /opt/veracode-cli && curl -fsS https://tools.veracode.com/veracode-cli/install | sh)
+          - export PATH="/opt/veracode-cli:$PATH"
+          - veracode version
           # Static scan of the checked-out files: IaC misconfigurations and secrets
           - |
             export VERACODE_API_KEY_ID="$VERACODE_API_ID"
             export VERACODE_API_KEY_SECRET="$VERACODE_API_KEY"
-            ./veracode scan --source . --type directory --format table || echo "IaC scan completed"
+            veracode scan --source . --type directory --format table || echo "IaC scan completed"
           - mkdir -p verascan
-          - ./veracode package --source . --output verascan --trust
+          - veracode package --source . --output verascan --trust
           - ls -lhR verascan
-          - find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.zip" \) > artifact_list.txt
+          - find verascan -type f \( -name "*.war" -o -name "*.jar" -o -name "*.ear" -o -name "*.zip" -o -name "*.apk" -o -name "*.ipa" \) | sort > artifact_list.txt
           - |
             if [ ! -s artifact_list.txt ]; then
               echo "ERROR: No packaged artifacts found"
@@ -62,10 +65,14 @@ definitions:
           - curl -sSL https://sca-downloads.veracode.com/ci.sh | bash -s -- scan --recursive --update-advisor || echo "SCA scan completed"
 
     # -------------------------------------------------------------------------
-    # PIPELINE SCAN (branch): no fail criteria, every flaw counts
+    # PIPELINE SCAN (branch): no fail criteria, every flaw counts.
+    # on-fail ignore: the step shows Failed (Ignored) but the build stays green,
+    # so this branch build cannot block the PR merge check. veracode-pr gates.
     # -------------------------------------------------------------------------
     - step: &pipeline-scan-branch
         name: Pipeline Scan (branch)
+        on-fail:
+          strategy: ignore
         script:
           - |
             GATE_POLICY=""
@@ -89,11 +96,11 @@ definitions:
               if [ -n "$GATE_POLICY" ]; then
                 java -jar pipeline-scan.jar -f "$artifact" \
                   -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
-                  --issue_details true --policy_name "$GATE_POLICY"
+                  --issue_details true --policy_name "$GATE_POLICY" < /dev/null
               else
                 java -jar pipeline-scan.jar -f "$artifact" \
                   -vid "$VERACODE_API_ID" -vkey "$VERACODE_API_KEY" \
-                  --issue_details true
+                  --issue_details true < /dev/null
               fi
               RC=$?
               set -e
@@ -117,7 +124,12 @@ definitions:
               exit 1
             fi
         artifacts:
-          - scan_results/**
+          upload:
+            - name: pipeline-scan-results-branch
+              type: scoped
+              capture-on: always
+              paths:
+                - scan_results/**
 
     # -------------------------------------------------------------------------
     # PIPELINE SCAN (PR): evaluate findings against a Veracode policy
@@ -130,7 +142,12 @@ definitions:
             echo "Gate: policy '$GATE_POLICY'"
           - *pipeline_scan_loop
         artifacts:
-          - scan_results/**
+          upload:
+            - name: pipeline-scan-results-pr
+              type: scoped
+              capture-on: always
+              paths:
+                - scan_results/**
 
     # -------------------------------------------------------------------------
     # POLICY SCAN: push to default branch
@@ -167,7 +184,7 @@ definitions:
               -action UploadAndScan \
               -appname "$APP_NAME" \
               -createprofile true \
-              -autoscan true \
+              -criticality "${VERACODE_BUSINESS_CRITICALITY:-VeryHigh}" \
               -filepath verascan \
               -version "${BITBUCKET_BRANCH}-${BITBUCKET_BUILD_NUMBER}-$(date +%Y%m%d%H%M%S)"
 
